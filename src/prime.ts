@@ -3,10 +3,11 @@ import { sleep } from './util';
 /**
  * Scroll through the page once (under the opaque overlay) so lazy images and
  * reveal-on-scroll sections exist before we snapshot, then put the scroll back.
+ * `limit` stops the pass at that page height: the rest of a long page wakes up as it is scrolled to.
  */
-export async function primeLazyContent(isDead: () => boolean, maxMs = 2500): Promise<void> {
+export async function primeLazyContent(isDead: () => boolean, maxMs = 2500, limit = Infinity): Promise<void> {
   const de = document.documentElement;
-  const H = de.scrollHeight;
+  const H = Math.min(de.scrollHeight, limit);
   const vh = window.innerHeight;
   if (typeof window.scrollTo !== 'function' || H <= vh * 1.2) return;
   const x = window.scrollX;

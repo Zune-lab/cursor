@@ -1,14 +1,22 @@
 import { AudioEngine } from './audio';
 import { ACCENT, COLORS, DEFAULT_MAX_TASKS, NAMES, RADII } from './constants';
 import { Cursor } from './cursor';
+import { EGGS, eggTarget, type EggKind } from './egg';
 import { flockStep } from './flock';
 import { FxLayer } from './fx';
 import { primeLazyContent } from './prime';
 import { createRng } from './rng';
-import { snapshot } from './snapshot';
+import { Scanner } from './snapshot';
 import type { Box, LineTask, MediaTask, SwarmOptions, SwarmOutcome, Task, TextTask } from './types';
 import { DEFAULT_LABELS, Ui } from './ui';
 import { clamp, ease, isEditable, isTransparent, pageSize, raf, sanitize, setStyle, sleep } from './util';
+
+/** The page is scanned this many viewport heights below the viewer (a task unlocks at 1.4, so it always exists in time). */
+const LOOKAHEAD = 2.2;
+const SELECT_HANDLES = [[0, 0], [50, 0], [100, 0], [0, 50], [100, 50], [0, 100], [50, 100], [100, 100]]
+  .map(([x, y]) => `<i style="left:${x}%;top:${y}%"></i>`)
+  .join('');
+const nextFrame = (): Promise<void> => new Promise((r) => raf(() => r()));
 
 export interface SwarmHooks {
   /** "Replay" button: start a fresh run with these options. */
@@ -22,6 +30,19 @@ export class Swarm {
   readonly done: Promise<SwarmOutcome>;
   private settle!: (o: SwarmOutcome) => void;
 
+  /** Viewport, cached from scroll/resize events so the hot loops never force a layout. */
+  private readonly vp = { x: window.scrollX, y: window.scrollY, w: window.innerWidth, h: window.innerHeight };
+  private pageW = 0;
+  private pageH = 0;
+  private scanner: Scanner;
+  private coveredTo = 0; // page height scanned so far
+  private scanDone = false;
+  private bandH = 0;
+  private prog = 0;
+  private readonly working = new Set<Cursor>(); // cursors in the middle of a task; the rest follow the real mouse
+  private lastScroll = 0;
+  private lastEgg = 0;
+  private egg: { kind: EggKind; t0: number } | null = null;
   private dead = false;
   private finished = false;
   private speed: number;
@@ -53,11 +74,13 @@ export class Swarm {
   constructor(private readonly opts: SwarmOptions, private readonly hooks: SwarmHooks) {
     this.done = new Promise((res) => (this.settle = res));
     this.rand = createRng(opts.seed);
-    this.nAgents = Math.max(1, Math.floor(opts.agents ?? 6));
+    this.nAgents = Math.max(1, Math.floor(opts.agents ?? (window.innerWidth < 640 ? 4 : 6)));
     this.total = this.nAgents;
     this.speed = opts.speed && opts.speed > 0 ? opts.speed : 1;
     this.colors = opts.colors?.length ? opts.colors : COLORS;
     this.names = opts.names?.length ? opts.names : NAMES;
+    this.scanner = new Scanner({ maxTasks: opts.maxTasks ?? DEFAULT_MAX_TASKS, exclude: opts.exclude });
+    this.bandH = Math.max(1200, this.vp.h * 1.5);
 
     const de = document.documentElement;
     const bg = [getComputedStyle(document.body).backgroundColor, getComputedStyle(de).backgroundColor].find((c) => !isTransparent(c)) || '#fff';
@@ -73,6 +96,8 @@ export class Swarm {
 
     addEventListener('mousemove', this.onMove);
     addEventListener('keydown', this.onKey);
+    addEventListener('scroll', this.onView, { passive: true });
+    addEventListener('resize', this.onView);
     this.ui.onAction(this.onAction);
 
     if (opts.tour) this.setTour(true);
@@ -93,7 +118,9 @@ export class Swarm {
     const dt = this.last ? Math.min(100, now - this.last) : 16.7;
     this.last = now;
     const k = dt / 16.7;
-    if (this.tour && this.qi < this.tasks.length) {
+    if (!this.scanDone && !this.orbiting && this.coveredTo < this.vp.y + this.vp.h * LOOKAHEAD) this.scanNext();
+    const more = this.qi < this.tasks.length || !this.scanDone;
+    if (this.tour && more) {
       const idle = 1 - Math.min(1, this.busy / this.total); // busy swarm -> slow down, idle swarm -> speed up
       this.vel += (idle * 7 * this.speed - this.vel) * (1 - Math.pow(0.92, k));
       this.acc += this.vel * k;
@@ -103,12 +130,16 @@ export class Swarm {
         this.acc -= whole;
       }
     }
+    if (!this.orbiting) {
+      this.sweepPast();
+      this.followMouse(now);
+    }
     this.sinceSpawn += dt;
     if (this.sinceSpawn >= 100) {
       this.sinceSpawn = 0;
-      const v = Math.abs(window.scrollY - this.lastY) * 10; // px/s
-      this.lastY = window.scrollY;
-      if (v > 800 && this.spawned < 6 && !this.finished && !this.orbiting && this.qi < this.tasks.length) {
+      const v = Math.abs(this.vp.y - this.lastY) * 10; // px/s
+      this.lastY = this.vp.y;
+      if (v > 800 && this.spawned < 6 && !this.finished && !this.orbiting && more) {
         const c = this.addCursor();
         this.total++;
         this.spawned++;
@@ -134,7 +165,7 @@ export class Swarm {
     this.audio.swell();
     const orbit = (): void => {
       if (this.dead || !this.orbiting) return;
-      flockStep(this.cursors, window.scrollX + window.innerWidth / 2, window.scrollY + window.innerHeight / 2, true);
+      flockStep(this.cursors, this.vp.x + this.vp.w / 2, this.vp.y + this.vp.h / 2, true);
       raf(orbit);
     };
     raf(orbit);
@@ -142,15 +173,22 @@ export class Swarm {
     const labels = { ...DEFAULT_LABELS, ...this.opts.labels };
     this.ui.setStatus(labels.preparing);
     await Promise.all([
-      this.opts.prime === false ? Promise.resolve() : primeLazyContent(() => this.dead),
+      this.opts.prime === false ? Promise.resolve() : primeLazyContent(() => this.dead, 2500, this.vp.y + this.vp.h * (LOOKAHEAD + 1)),
       sleep(900 / this.speed),
     ]);
     if (this.dead) return;
 
-    this.tasks = snapshot({ maxTasks: this.opts.maxTasks ?? DEFAULT_MAX_TASKS, exclude: this.opts.exclude });
     this.ui.resizeTo(0, 0); // measure the page itself, not our own overlay
     const size = pageSize();
     this.ui.resizeTo(size.w, size.h);
+    this.pageW = size.w;
+    this.pageH = size.h;
+    // scan down to just below the viewer, a band per frame, so a huge page never freezes the tab
+    while (!this.scanDone && this.coveredTo < this.vp.y + this.vp.h * LOOKAHEAD) {
+      this.scanNext();
+      if (!this.scanDone && this.coveredTo < this.vp.y + this.vp.h * LOOKAHEAD) await nextFrame();
+      if (this.dead) return;
+    }
     this.ui.setStatus(labels.ready);
     this.orbiting = false;
     this.ui.hideFavicon();
@@ -164,6 +202,8 @@ export class Swarm {
     this.dead = true;
     removeEventListener('mousemove', this.onMove);
     removeEventListener('keydown', this.onKey);
+    removeEventListener('scroll', this.onView);
+    removeEventListener('resize', this.onView);
     this.fx.dispose();
     this.audio.close();
     this.ui.host.remove();
@@ -173,6 +213,14 @@ export class Swarm {
   }
 
   /* ---------- input ---------- */
+
+  private onView = (): void => {
+    this.lastScroll = performance.now();
+    this.vp.x = window.scrollX;
+    this.vp.y = window.scrollY;
+    this.vp.w = window.innerWidth;
+    this.vp.h = window.innerHeight;
+  };
 
   private onMove = (e: MouseEvent): void => {
     this.cx = e.clientX;
@@ -228,14 +276,14 @@ export class Swarm {
   }
 
   private pan(c: Cursor): number {
-    return clamp(((c.x - window.scrollX) / window.innerWidth) * 2 - 1, -1, 1);
+    return clamp(((c.x - this.vp.x) / this.vp.w) * 2 - 1, -1, 1);
   }
 
   private addCursor(): Cursor {
     const c = new Cursor(this.cursors.length, this.ui.layer, this.colors, this.names, this.opts.showNames === true);
     c.set(
-      window.scrollX + window.innerWidth / 2 + (this.rand() - 0.5) * 200,
-      window.scrollY + window.innerHeight / 2 + (this.rand() - 0.5) * 200,
+      this.vp.x + this.vp.w / 2 + (this.rand() - 0.5) * 200,
+      this.vp.y + this.vp.h / 2 + (this.rand() - 0.5) * 200,
     );
     this.cursors.push(c);
     return c;
@@ -251,11 +299,38 @@ export class Swarm {
     });
   }
 
+  /** Scan the next band of the page (a few ms). The band size adapts to how long the last scan took. */
+  private scanNext(): void {
+    const live = pageSize(); // the page may have grown (lazy / infinite content)
+    if (live.h > this.pageH) {
+      this.pageH = live.h;
+      this.ui.resizeTo(Math.max(this.pageW, live.w), live.h);
+    }
+    if (this.coveredTo >= this.pageH) {
+      this.scanDone = true;
+      return;
+    }
+    const t0 = performance.now();
+    const bottom = Math.min(this.pageH, this.coveredTo + this.bandH);
+    const last = bottom >= this.pageH;
+    const found = this.scanner.scan(this.coveredTo === 0 ? -Infinity : this.coveredTo, last ? Infinity : bottom);
+    for (const t of found) this.tasks.push(t);
+    this.coveredTo = bottom;
+    if (last || this.scanner.capped) this.scanDone = true;
+    const dt = performance.now() - t0;
+    if (dt > 24) this.bandH = Math.max(this.vp.h, this.bandH * 0.6);
+    else if (dt < 6) this.bandH = Math.min(this.vp.h * 6, this.bandH * 1.5);
+  }
+
+  /** 0..1, never goes backwards; the total is estimated from the part of the page scanned so far. */
   private tick(): void {
     this.built++;
-    const p = Math.min(1, this.built / Math.max(1, this.tasks.length));
-    this.ui.setProgress(p);
-    this.opts.onProgress?.(p);
+    const n = this.tasks.length;
+    const est = this.scanDone ? n : n * (this.pageH / Math.max(1, this.coveredTo));
+    const p = this.scanDone && this.built >= n ? 1 : Math.min(0.99, this.built / Math.max(1, est));
+    this.prog = Math.max(this.prog, p);
+    this.ui.setProgress(this.prog);
+    this.opts.onProgress?.(this.prog);
   }
 
   private dot(x: number, y: number): HTMLDivElement {
@@ -273,8 +348,7 @@ export class Swarm {
     const el = document.createElement('div');
     el.className = 'sel';
     Object.assign(el.style, { left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px` });
-    el.innerHTML = [[0, 0], [50, 0], [100, 0], [0, 50], [100, 50], [0, 100], [50, 100], [100, 100]]
-      .map(([x, y]) => `<i style="left:${x}%;top:${y}%"></i>`).join('');
+    el.innerHTML = SELECT_HANDLES;
     this.ui.layer.appendChild(el);
     setTimeout(() => el.remove(), 260 / this.speed);
   }
@@ -318,14 +392,14 @@ export class Swarm {
   /** Pull a red guide out of the ruler to a shared left edge. */
   private async dragGuide(c: Cursor, x: number): Promise<void> {
     const g = document.createElement('div');
-    const y = window.scrollY + window.innerHeight / 2;
+    const y = this.vp.y + this.vp.h / 2;
     g.className = 'guide';
     this.ui.layer.appendChild(g);
     this.ui.setRuler(true);
-    await this.moveTo(c, window.scrollX + 10, y);
+    await this.moveTo(c, this.vp.x + 10, y);
     c.tint(true);
     await this.tween(500 / this.speed, (e) => {
-      const gx = window.scrollX + (x - window.scrollX) * e;
+      const gx = this.vp.x + (x - this.vp.x) * e;
       g.style.left = `${gx}px`;
       c.set(gx, y);
       c.say(String(Math.round(gx)), true);
@@ -341,6 +415,7 @@ export class Swarm {
   private async doTask(c: Cursor, t: Task): Promise<void> {
     const { b } = t;
     this.busy++;
+    this.working.add(c);
     try {
       if (t.kind === 'line') {
         await this.penLine(c, t);
@@ -409,17 +484,18 @@ export class Swarm {
 
       c.mode('arrow');
       if (b.w * b.h > 1500) this.select(b);
-      this.audio.note(b.w * b.h, b.x / (this.ui.host.offsetWidth || window.innerWidth), this.pan(c));
+      this.audio.note(b.w * b.h, b.x / (this.pageW || this.vp.w), this.pan(c));
       t.done = true;
       this.tick();
       if (b.w * b.h > 15000) this.fx.burst(b.x + b.w / 2, b.y + b.h / 2, c.col, 10);
     } finally {
       this.busy--;
+      this.working.delete(c);
     }
   }
 
-  private async fillMedia(d: HTMLDivElement, t: MediaTask): Promise<void> {
-    d.className = 'pop';
+  private async fillMedia(d: HTMLDivElement, t: MediaTask, animate = true): Promise<void> {
+    d.className = animate ? 'pop' : '';
     d.style.overflow = 'hidden';
     for (const p of RADII) setStyle(d, p, t.cs[p]);
     d.style.boxShadow = t.cs.boxShadow;
@@ -449,7 +525,7 @@ export class Swarm {
       inner.style.cssText = 'width:100%;height:100%;background:#8884';
     }
     d.appendChild(inner);
-    if (t.tag === 'img' || (t.src && t.tag !== 'svg')) {
+    if (animate && (t.tag === 'img' || (t.src && t.tag !== 'svg'))) {
       await this.tween(450 / this.speed, (e) => (inner.style.clipPath = `inset(0 0 ${100 - e * 100}% 0)`));
     }
   }
@@ -505,12 +581,90 @@ export class Swarm {
 
   /** Next task, `'wait'` if nothing is unlocked yet, `null` when the queue is empty. */
   private next(): Task | 'wait' | null {
-    if (this.qi >= this.tasks.length) return null;
+    if (this.qi >= this.tasks.length) return this.scanDone ? null : 'wait'; // more of the page is still to be scanned
     const t = this.tasks[this.qi];
-    if (t.key > window.scrollY + window.innerHeight * 1.4) return 'wait'; // locked until the viewer scrolls near it
+    if (t.key > this.vp.y + this.vp.h) return 'wait'; // drawn only once the viewer has scrolled to it
     if (t.parent && !t.parent.done) return 'wait'; // children wait for their parent box
     this.qi++;
     return t;
+  }
+
+  /**
+   * Anything the viewer has scrolled well past without it being built appears at once,
+   * so a fast scroll never leaves holes behind. Capped per frame to stay smooth.
+   */
+  private sweepPast(): void {
+    const edge = this.vp.y - this.vp.h * 0.6;
+    for (let n = 0; n < 60 && this.qi < this.tasks.length; n++) {
+      const t = this.tasks[this.qi];
+      if (t.key >= edge) break;
+      this.qi++;
+      try {
+        this.place(t);
+      } catch (err) {
+        console.warn('[swarm-cursors] task failed', err);
+      }
+      t.done = true;
+      this.tick();
+    }
+  }
+
+  /** Final state of a task with no animation. */
+  private place(t: Task): void {
+    const { b } = t;
+    const d = document.createElement('div');
+    Object.assign(d.style, { position: 'absolute', left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px`, zIndex: String(t.order), boxSizing: 'border-box' });
+    this.ui.layer.appendChild(d);
+    if (t.kind === 'line') {
+      const th = Math.max(1, t.lw);
+      const horiz = Math.abs(t.pts[2] - t.pts[0]) >= Math.abs(t.pts[3] - t.pts[1]);
+      Object.assign(d.style, {
+        left: `${Math.min(t.pts[0], t.pts[2]) - (horiz ? 0 : th / 2)}px`, top: `${Math.min(t.pts[1], t.pts[3]) - (horiz ? th / 2 : 0)}px`,
+        width: horiz ? `${Math.abs(t.pts[2] - t.pts[0])}px` : `${th}px`, height: horiz ? `${th}px` : `${Math.abs(t.pts[3] - t.pts[1])}px`, background: t.color,
+      });
+    } else if (t.kind === 'rect') {
+      Object.assign(d.style, t.cs);
+    } else if (t.kind === 'media') {
+      void this.fillMedia(d, t, false);
+    } else {
+      Object.assign(d.style, t.cs);
+      d.innerHTML = t.html;
+      sanitize(d);
+    }
+  }
+
+  /**
+   * Cursors with nothing to do follow the real mouse (the same swirl that closes the show).
+   * Once in a while, when everything is quiet, they pull off a small easter egg around it.
+   */
+  private followMouse(now: number): void {
+    const idle = this.cursors.filter((c) => !this.working.has(c));
+    if (!idle.length) return;
+    const tx = this.cx + this.vp.x;
+    const ty = this.cy + this.vp.y;
+    const e = this.egg;
+    if (e) {
+      const t = (now - e.t0) / 1000;
+      if (t > 3.6) {
+        this.egg = null;
+        this.lastEgg = now;
+        for (const c of idle) this.fx.burst(c.x, c.y, c.col, 8);
+      } else {
+        idle.forEach((c, i) => {
+          const [x, y] = eggTarget(e.kind, i, idle.length, tx, ty, t);
+          c.vx = (x - c.x) * 0.15;
+          c.vy = (y - c.y) * 0.15;
+          c.set(c.x + c.vx, c.y + c.vy);
+        });
+        return;
+      }
+    }
+    flockStep(idle, tx, ty, true);
+    const quiet = this.busy === 0 && now - this.lastScroll > 1500 && idle.length >= 3;
+    if (this.opts.easterEggs !== false && quiet && now - this.lastEgg > 20000 && this.rand() < 0.0006) {
+      this.egg = { kind: EGGS[Math.floor(this.rand() * EGGS.length)], t0: now };
+      this.audio.arpeggio();
+    }
   }
 
   private async agent(c: Cursor): Promise<void> {
@@ -518,7 +672,7 @@ export class Swarm {
       const t = this.next();
       if (t === null) break;
       if (t === 'wait') {
-        await this.moveTo(c, window.scrollX + window.innerWidth * (0.2 + this.rand() * 0.6), window.scrollY + window.innerHeight * (0.2 + this.rand() * 0.6));
+        await sleep(60); // nothing unlocked: this cursor follows the mouse (followMouse) until something is
         continue;
       }
       try {
@@ -541,11 +695,5 @@ export class Swarm {
     this.ui.showFinished();
     this.settle('finished');
     this.opts.onFinish?.();
-    const loop = (): void => {
-      if (this.dead) return;
-      flockStep(this.cursors, this.cx + window.scrollX, this.cy + window.scrollY, true);
-      raf(loop);
-    };
-    raf(loop);
   }
 }

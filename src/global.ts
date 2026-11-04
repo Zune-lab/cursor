@@ -16,6 +16,10 @@ export function optionsFromScript(el: HTMLElement | null): SwarmOptions {
   if (d.speed && +d.speed > 0) o.speed = +d.speed;
   if (d.sound === 'off') o.sound = false;
   if (d.fx === 'off') o.fx = false;
+  if (d.eggs === 'off') o.easterEggs = false;
+  if (d.maxTasks && +d.maxTasks > 0) o.maxTasks = +d.maxTasks;
+  if (d.prime === 'off') o.prime = false;
+  if (d.tour === 'on') o.tour = true;
   if (d.exclude) o.exclude = d.exclude;
   if (d.labels) {
     try {
@@ -34,4 +38,6 @@ if (!window.SwarmCursors) {
   const opts = optionsFromScript(me);
   if (!(me && me.dataset.hotkey === 'off')) bindHotkey(() => opts);
   if (me && me.hasAttribute('data-auto')) addEventListener('load', () => void start(opts));
+  // data-trigger="query": only start when the URL has ?swarm
+  else if (me && me.dataset.trigger === 'query' && new URLSearchParams(location.search).has('swarm')) addEventListener('load', () => void start(opts));
 }

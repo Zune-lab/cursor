@@ -42,9 +42,11 @@ export interface SwarmOptions {
   prime?: boolean;
   /** Start with the auto-scroll tour already running. Default false. */
   tour?: boolean;
+  /** Occasional easter eggs (a heart, a ring, a wave) when the swarm is idle. Default true. */
+  easterEggs?: boolean;
   /** Seed for cursor motion, so a take can be repeated (screen recordings, tests). */
   seed?: number;
-  /** Hard cap on how many page elements are rebuilt. Default 1500. */
+  /** Hard cap on how many page elements are rebuilt. The page is scanned band by band while you scroll, so the default is high. Default 20000. */
   maxTasks?: number;
   /** CSS selector of elements to leave out (their subtree is skipped). */
   exclude?: string;
@@ -94,7 +96,7 @@ export interface RectTask extends TaskBase {
   cs: StyleBag;
 }
 
-export type MediaTag = 'img' | 'video' | 'canvas' | 'svg';
+export type MediaTag = 'img' | 'video' | 'canvas' | 'svg' | 'iframe';
 
 export interface MediaTask extends TaskBase {
   kind: 'media';

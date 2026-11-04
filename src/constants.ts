@@ -26,4 +26,4 @@ export const MEDIA_TAGS = ['img', 'video', 'canvas', 'svg'];
 /** E major pentatonic. */
 export const PENTA = [329.6, 370, 415.3, 493.9, 554.4];
 
-export const DEFAULT_MAX_TASKS = 1500;
+export const DEFAULT_MAX_TASKS = 20000;
