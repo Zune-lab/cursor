@@ -1,0 +1,522 @@
+--- a/README.md
++++ b/README.md
+@@ -39,6 +39,8 @@
+ |---|---|---|
+ | `agents` | `6` | cursors that start building (fast scrolling summons up to 6 more) |
+ | `speed` | `1` | speed multiplier |
++| `tour` | `false` | start with the auto-scroll tour already running (<kbd>Space</kbd> toggles it) |
++| `seed` | – | makes cursor motion reproducible (screen recordings, tests) |
+ | `sound` | `true` | WebAudio build sounds (toggle with <kbd>M</kbd>) |
+ | `fx` | `!prefers-reduced-motion` | spark bursts |
+ | `colors` | built-ins | cycled per cursor |
+@@ -49,7 +51,7 @@
+ | `labels` | English | toolbar strings (`tour`, `preparing`, `tapForSound`, …); `building` is `(percent) => string` |
+ | `onProgress`, `onFinish`, `onStop` | – | callbacks |
+ 
+-<kbd>Esc</kbd> closes, <kbd>M</kbd> toggles sound, "Go live" fades the overlay out.
++<kbd>Esc</kbd> closes, <kbd>M</kbd> toggles sound, <kbd>Space</kbd> toggles the tour, "Go live" fades the overlay out.
+ 
+ ## Chrome extension
+ 
+@@ -69,6 +71,13 @@
+ Known limits: bare text slotted into a web component is skipped (elements are fine); inner scroll containers are rebuilt only for the part inside the page's own scroll;
+ pseudo-elements (`::before` / `::after`) are not rebuilt.
+ 
++## Performance notes
++
++- Snapshot reads computed style and geometry once per element (a 180-element sample went from 242 / 541 reads to 181 / 181).
++- One `requestAnimationFrame` pump drives the tour and the "scrolling fast -> more cursors" check (two `setInterval`s before); the tour is time-based, so it is frame-rate independent.
++- The spark canvas only runs while sparks are alive; typing only touches the DOM when a new character appears.
++- The overlay layer uses CSS containment, and everything off-screen is clipped by the host.
++
+ ## Credits
+ 
+ The idea comes from **Swarm** by Joel Califa ([site](https://califa.github.io/swarm-site/), [source](https://github.com/califa/swarm-site))
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "swarm-cursors",
+-  "version": "2.1.0",
++  "version": "2.2.0",
+   "description": "Blank the page, then a swarm of fake multiplayer cursors rebuilds it live \u2014 boxes, text, images, sound and sparks.",
+   "type": "module",
+   "license": "MIT",
+--- a/src/fx.ts
++++ b/src/fx.ts
+@@ -15,6 +15,7 @@
+     private readonly canvas: HTMLCanvasElement,
+     readonly enabled: boolean,
+     private readonly alive: () => boolean,
++    private readonly rand: () => number = Math.random,
+   ) {
+     this.g = enabled ? canvas.getContext('2d') : null;
+     this.fit();
+@@ -27,18 +28,15 @@
+     this.canvas.height = window.innerHeight * this.dpr;
+   };
+ 
+-  start(): void {
+-    if (this.g && !this.running) {
+-      this.running = true;
+-      raf(this.frame);
+-    }
+-  }
+-
+   burst(x: number, y: number, col: string, n: number): void {
+     if (!this.g) return;
+     for (let i = 0; i < n; i++) {
+-      const a = Math.random() * 6.283, v = 2 + Math.random() * 5;
+-      this.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, life: 1, col, s: 2 + Math.random() * 3 });
++      const a = this.rand() * 6.283, v = 2 + this.rand() * 5;
++      this.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, life: 1, col, s: 2 + this.rand() * 3 });
++    }
++    if (!this.running) { // the loop only runs while sparks are alive
++      this.running = true;
++      raf(this.frame);
+     }
+   }
+ 
+@@ -48,7 +46,7 @@
+ 
+   private frame = (): void => {
+     const g = this.g;
+-    if (!g || !this.alive()) return;
++    if (!g || !this.alive()) { this.running = false; return; }
+     const { scrollX, scrollY, innerWidth, innerHeight } = window;
+     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+     g.clearRect(0, 0, innerWidth, innerHeight);
+@@ -61,6 +59,7 @@
+       g.fillRect(q.x - scrollX, q.y - scrollY, q.s, q.s);
+     }
+     g.globalAlpha = 1;
+-    raf(this.frame);
++    if (this.parts.length) raf(this.frame);
++    else this.running = false; // last spark gone: the canvas was cleared above, stop the loop
+   };
+ }
+--- a/src/rng.ts
++++ b/src/rng.ts
+@@ -0,0 +1,12 @@
++/** Mulberry32: tiny seeded PRNG. Without a seed it is just Math.random. */
++export function createRng(seed?: number): () => number {
++  if (seed === undefined || !Number.isFinite(seed)) return Math.random;
++  let a = seed >>> 0;
++  return () => {
++    a = (a + 0x6d2b79f5) >>> 0;
++    let t = a;
++    t = Math.imul(t ^ (t >>> 15), t | 1);
++    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
++    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
++  };
++}
+--- a/src/snapshot.ts
++++ b/src/snapshot.ts
+@@ -64,15 +64,28 @@
+   let cur: RectTask | null = null;
+   const sx = window.scrollX;
+   const sy = window.scrollY;
++  // Nothing is written to the DOM while we walk it, so style and geometry can be read once per element.
++  const styles = new WeakMap<Element, CSSStyleDeclaration>();
++  const rects = new WeakMap<Element, DOMRect>();
++  const styleOf = (el: Element): CSSStyleDeclaration => {
++    let v = styles.get(el);
++    if (!v) styles.set(el, (v = getComputedStyle(el)));
++    return v;
++  };
++  const rectOf = (el: Element): DOMRect => {
++    let v = rects.get(el);
++    if (!v) rects.set(el, (v = el.getBoundingClientRect()));
++    return v;
++  };
+ 
+   const visit = (el: Element): void => {
+     if (out.length > max || el.hasAttribute('data-swarm')) return;
+     if (opts.exclude && el.matches(opts.exclude)) return;
+     const tag = el.tagName.toLowerCase();
+     if (SKIP_TAGS.includes(tag)) return;
+-    const cs = getComputedStyle(el);
++    const cs = styleOf(el);
+     if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return;
+-    const r = el.getBoundingClientRect();
++    const r = rectOf(el);
+     const b: Box = { x: r.left + sx, y: r.top + sy, w: r.width, h: r.height };
+     const ok = b.w >= 1 && b.h >= 1;
+     let mine: RectTask | null = null;
+@@ -106,7 +119,7 @@
+     const kids = childrenOf(el);
+     const ownText = nodesOf(el).some((n) => n.nodeType === 3 && (n.textContent ?? '').trim());
+     const inlineOnly = kids.every((k) => {
+-      const d = getComputedStyle(k).display;
++      const d = styleOf(k).display;
+       return d.startsWith('inline') || d === 'contents' || k.tagName === 'BR';
+     });
+     if (ok && ownText && inlineOnly) {
+@@ -124,20 +137,21 @@
+     if (mine) cur = mine;
+     // Repeated siblings (>= 3 of the same shape) -> first is built, the rest are Alt-dragged copies.
+     const sig = (k: Element): string => {
+-      const q = k.getBoundingClientRect();
++      const q = rectOf(k);
+       return `${k.tagName}|${k.getAttribute('class') ?? ''}|${Math.round(q.width / 4)}|${Math.round(q.height / 4)}`;
+     };
+-    const groups: Record<string, Element[]> = {};
++    const sigs = kids.map(sig);
++    const counts: Record<string, number> = {};
+     const masters: Record<string, Task> = {};
+-    for (const k of kids) (groups[sig(k)] ||= []).push(k);
+-    for (const k of kids) {
+-      const g = sig(k);
++    for (const g of sigs) counts[g] = (counts[g] ?? 0) + 1;
++    kids.forEach((k, i) => {
++      const g = sigs[i];
+       const i0 = out.length;
+       visit(k);
+-      if (groups[g].length < 3 || out.length === i0) continue;
++      if (counts[g] < 3 || out.length === i0) return;
+       if (!masters[g]) masters[g] = out[i0];
+       else out[i0].dupFrom = masters[g].b;
+-    }
++    });
+     cur = prev;
+   };
+ 
+--- a/src/styles.ts
++++ b/src/styles.ts
+@@ -1,7 +1,7 @@
+ /** Shadow-DOM stylesheet. Kept as one string so the bundle stays a single file. */
+ export const CSS = `
+ :host{all:initial}
+-.layer{position:absolute;inset:0;isolation:isolate}
++.layer{position:absolute;inset:0;isolation:isolate;contain:layout style}
+ .ph{background:rgba(120,120,120,.16);outline:1px solid #0d99ff}
+ .ph.txt{background:transparent}
+ .cur{position:absolute;left:0;top:0;pointer-events:none;z-index:2147483000;will-change:transform}
+--- a/src/swarm.ts
++++ b/src/swarm.ts
+@@ -4,6 +4,7 @@
+ import { flockStep } from './flock';
+ import { FxLayer } from './fx';
+ import { primeLazyContent } from './prime';
++import { createRng } from './rng';
+ import { snapshot } from './snapshot';
+ import type { Box, LineTask, MediaTask, SwarmOptions, SwarmOutcome, Task, TextTask } from './types';
+ import { DEFAULT_LABELS, Ui } from './ui';
+@@ -16,7 +17,7 @@
+   disposed(): void;
+ }
+ 
+-/** One run of the effect: owns the overlay, the cursors, the timers and the task queue. */
++/** One run of the effect: owns the overlay, the cursors, the frame pump and the task queue. */
+ export class Swarm {
+   readonly done: Promise<SwarmOutcome>;
+   private settle!: (o: SwarmOutcome) => void;
+@@ -36,7 +37,10 @@
+   private acc = 0;
+   private cx = window.innerWidth / 2;
+   private cy = window.innerHeight / 2;
+-  private readonly timers: number[] = [];
++  private readonly rand: () => number;
++  private last = 0; // previous rAF timestamp (pump)
++  private sinceSpawn = 0;
++  private lastY = window.scrollY;
+   private readonly cursors: Cursor[] = [];
+   private tasks: Task[] = [];
+   private orbiting = true;
+@@ -48,6 +52,7 @@
+ 
+   constructor(private readonly opts: SwarmOptions, private readonly hooks: SwarmHooks) {
+     this.done = new Promise((res) => (this.settle = res));
++    this.rand = createRng(opts.seed);
+     this.nAgents = Math.max(1, Math.floor(opts.agents ?? 6));
+     this.total = this.nAgents;
+     this.speed = opts.speed && opts.speed > 0 ? opts.speed : 1;
+@@ -61,7 +66,7 @@
+     this.audio = new AudioEngine(opts.sound !== false, (locked) => this.ui.setSoundLocked(locked));
+     this.ui.setSound(this.audio.enabled);
+     const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+-    this.fx = new FxLayer(this.ui.canvas, opts.fx ?? !reduced, () => !this.dead);
++    this.fx = new FxLayer(this.ui.canvas, opts.fx ?? !reduced, () => !this.dead, this.rand);
+ 
+     de.appendChild(this.ui.host);
+     raf(() => (this.ui.host.style.opacity = '1'));
+@@ -70,33 +75,52 @@
+     addEventListener('keydown', this.onKey);
+     this.ui.onAction(this.onAction);
+ 
+-    // Tour: auto-scroll only as fast as the swarm keeps up.
+-    this.timers.push(window.setInterval(() => {
+-      if (!this.tour || this.qi >= this.tasks.length) return;
+-      const idle = 1 - Math.min(1, this.busy / this.total); // busy swarm -> slow down, idle swarm -> speed up
+-      this.vel += (idle * 7 * this.speed - this.vel) * 0.08;
+-      this.acc += this.vel;
+-      const whole = Math.floor(this.acc);
+-      if (whole >= 1) { scrollBy(0, whole); this.acc -= whole; }
+-    }, 16));
+-
++    if (opts.tour) this.setTour(true);
++    if ([1, 2, 3].includes(this.speed)) this.ui.setSpeed(`s${this.speed}`);
+     for (let i = 0; i < this.nAgents; i++) this.addCursor();
+-    this.fx.start();
++    raf(this.pump);
++
++    void this.boot();
++  }
+ 
+-    // Fast scrolling summons extra cursors (up to 6).
+-    let lastY = window.scrollY;
+-    this.timers.push(window.setInterval(() => {
+-      const v = Math.abs(window.scrollY - lastY) * 10; // px/s
+-      lastY = window.scrollY;
++  /**
++   * One rAF loop for everything periodic (replaces two setIntervals):
++   * the tour auto-scroll, which only goes as fast as the swarm keeps up, and the
++   * "scroll fast -> more cursors join" check. Time-based, so it is frame-rate independent.
++   */
++  private pump = (now: number): void => {
++    if (this.dead) return;
++    const dt = this.last ? Math.min(100, now - this.last) : 16.7;
++    this.last = now;
++    const k = dt / 16.7;
++    if (this.tour && this.qi < this.tasks.length) {
++      const idle = 1 - Math.min(1, this.busy / this.total); // busy swarm -> slow down, idle swarm -> speed up
++      this.vel += (idle * 7 * this.speed - this.vel) * (1 - Math.pow(0.92, k));
++      this.acc += this.vel * k;
++      const whole = Math.floor(this.acc);
++      if (whole >= 1) {
++        scrollBy({ top: whole, behavior: 'instant' });
++        this.acc -= whole;
++      }
++    }
++    this.sinceSpawn += dt;
++    if (this.sinceSpawn >= 100) {
++      this.sinceSpawn = 0;
++      const v = Math.abs(window.scrollY - this.lastY) * 10; // px/s
++      this.lastY = window.scrollY;
+       if (v > 800 && this.spawned < 6 && !this.finished && !this.orbiting && this.qi < this.tasks.length) {
+         const c = this.addCursor();
+         this.total++;
+         this.spawned++;
+         void this.agent(c);
+       }
+-    }, 100));
++    }
++    raf(this.pump);
++  };
+ 
+-    void this.boot();
++  private setTour(on: boolean): void {
++    this.tour = on;
++    this.ui.setTour(on);
+   }
+ 
+   /**
+@@ -138,7 +162,6 @@
+   stop(): void {
+     if (this.dead) return;
+     this.dead = true;
+-    this.timers.forEach(clearInterval);
+     removeEventListener('mousemove', this.onMove);
+     removeEventListener('keydown', this.onKey);
+     this.fx.dispose();
+@@ -159,23 +182,23 @@
+   private onKey = (e: KeyboardEvent): void => {
+     if (e.key === 'Escape') this.stop();
+     else if ((e.key === 'm' || e.key === 'M') && !isEditable(e.target)) this.toggleSound();
++    else if (e.key === ' ' && !isEditable(e.target) && (e.composedPath()[0] as Element | undefined)?.tagName !== 'BUTTON') {
++      e.preventDefault(); // Space toggles the tour (and doesn't scroll the page under the overlay)
++      this.setTour(!this.tour);
++    }
+   };
+ 
+   private onAction = (a: string, btn: HTMLElement): void => {
+     if (a === 'x') return this.stop();
+     if (a === 'snd') return this.toggleSound();
+-    if (a === 're') return this.hooks.replay({ ...this.opts, speed: this.speed, sound: this.audio.enabled });
++    if (a === 're') return this.hooks.replay({ ...this.opts, speed: this.speed, sound: this.audio.enabled, tour: this.tour });
+     if (a === 'live') {
+       this.audio.sweepDown();
+       this.ui.host.style.opacity = '0';
+       setTimeout(() => this.stop(), 500);
+       return;
+     }
+-    if (a === 'tour') {
+-      this.tour = !this.tour;
+-      this.ui.setTour(this.tour);
+-      return;
+-    }
++    if (a === 'tour') return this.setTour(!this.tour);
+     const n = /^s(\d)$/.exec(a);
+     if (n && btn) {
+       this.speed = +n[1];
+@@ -211,8 +234,8 @@
+   private addCursor(): Cursor {
+     const c = new Cursor(this.cursors.length, this.ui.layer, this.colors, this.names, this.opts.showNames === true);
+     c.set(
+-      window.scrollX + window.innerWidth / 2 + (Math.random() - 0.5) * 200,
+-      window.scrollY + window.innerHeight / 2 + (Math.random() - 0.5) * 200,
++      window.scrollX + window.innerWidth / 2 + (this.rand() - 0.5) * 200,
++      window.scrollY + window.innerHeight / 2 + (this.rand() - 0.5) * 200,
+     );
+     this.cursors.push(c);
+     return c;
+@@ -221,7 +244,7 @@
+   private moveTo(c: Cursor, x: number, y: number): Promise<void> {
+     const x0 = c.x, y0 = c.y, d = Math.hypot(x - x0, y - y0) || 1;
+     const nx = -(y - y0) / d, ny = (x - x0) / d;
+-    const bend = (Math.random() - 0.5) * Math.min(120, d * 0.25);
++    const bend = (this.rand() - 0.5) * Math.min(120, d * 0.25);
+     return this.tween(Math.min(1100, 180 + d * 0.9) / this.speed, (e) => {
+       const k = Math.sin(Math.PI * e) * bend;
+       c.set(x0 + (x - x0) * e + nx * k, y0 + (y - y0) * e + ny * k);
+@@ -446,27 +469,30 @@
+     const caret = document.createElement('span');
+     caret.className = 'caret';
+     d.appendChild(caret);
+-    let lastK = 0;
++    let lastK = 0; // chars already typed (also the sound cursor)
+     let lastFs = 0;
++    let shown = -1; // chars currently in the DOM
+     const fs = parseFloat(t.cs.fontSize);
+     const grow = fs >= 28; // big headings start small and step up
+     await this.tween(Math.min(1800, total * 22) / this.speed, (e) => {
+-      let k = Math.floor(e * total);
++      const k = Math.floor(e * total);
+       if (k - lastK >= 2) {
+         this.audio.key(this.pan(c), full.slice(lastK, k).includes(' '));
+         lastK = k;
+       }
+       if (grow) {
+         const now = Math.round(18 + (fs - 18) * e);
+-        if (now !== lastFs) { lastFs = now; this.audio.tickUp(e, this.pan(c)); }
+-        d.style.fontSize = `${now}px`;
++        if (now !== lastFs) { lastFs = now; this.audio.tickUp(e, this.pan(c)); d.style.fontSize = `${now}px`; }
+       }
++      if (k === shown) return; // nothing new to type this frame: no DOM writes, no layout
++      shown = k;
++      let left = k;
+       let typing: Text | null = null;
+       for (const [node, text] of nodes) {
+-        const m = Math.min(k, text.length);
++        const m = Math.min(left, text.length);
+         node.nodeValue = text.slice(0, m);
+         if (m > 0) typing = node;
+-        k -= m;
++        left -= m;
+       }
+       if (typing && caret.previousSibling !== typing) typing.after(caret); // caret follows the typing position
+     });
+@@ -492,7 +518,7 @@
+       const t = this.next();
+       if (t === null) break;
+       if (t === 'wait') {
+-        await this.moveTo(c, window.scrollX + window.innerWidth * (0.2 + Math.random() * 0.6), window.scrollY + window.innerHeight * (0.2 + Math.random() * 0.6));
++        await this.moveTo(c, window.scrollX + window.innerWidth * (0.2 + this.rand() * 0.6), window.scrollY + window.innerHeight * (0.2 + this.rand() * 0.6));
+         continue;
+       }
+       try {
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -40,6 +40,10 @@
+   colors?: string[];
+   /** Scroll the page once (hidden) first so lazy images / reveal-on-scroll content exist. Default true. */
+   prime?: boolean;
++  /** Start with the auto-scroll tour already running. Default false. */
++  tour?: boolean;
++  /** Seed for cursor motion, so a take can be repeated (screen recordings, tests). */
++  seed?: number;
+   /** Hard cap on how many page elements are rebuilt. Default 1500. */
+   maxTasks?: number;
+   /** CSS selector of elements to leave out (their subtree is skipped). */
+--- a/test/perf.test.ts
++++ b/test/perf.test.ts
+@@ -0,0 +1,28 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { snapshot } from '../src/snapshot';
++
++beforeEach(() => {
++  Element.prototype.getBoundingClientRect = function (this: Element) {
++    const raw = this.getAttribute('data-box');
++    const [x, y, w, h] = raw ? raw.split(',').map(Number) : [0, 0, 0, 0];
++    return { x, y, left: x, top: y, width: w, height: h, right: x + w, bottom: y + h, toJSON() {} } as DOMRect;
++  };
++});
++afterEach(() => { document.body.innerHTML = ''; vi.restoreAllMocks(); });
++
++/** Guards the snapshot against re-reading layout/style for the same element over and over. */
++describe('snapshot cost', () => {
++  it('reads style and geometry about once per element', () => {
++    const cards = Array.from({ length: 60 }, (_, i) =>
++      `<div class="card" data-box="${(i % 3) * 300},${i * 40},280,120" style="background:#fff;border:1px solid #ddd">
++         <h3 data-box="10,${i * 40 + 10},200,24">Title ${i}</h3><p data-box="10,${i * 40 + 40},200,20">Body ${i}</p></div>`).join('');
++    document.body.innerHTML = cards;
++    const total = document.body.querySelectorAll('*').length + 1;
++    const gcs = vi.spyOn(window, 'getComputedStyle');
++    const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect');
++    snapshot();
++    console.log(`elements=${total} getComputedStyle=${gcs.mock.calls.length} getBoundingClientRect=${rect.mock.calls.length}`);
++    expect(gcs.mock.calls.length).toBeLessThanOrEqual(total);
++    expect(rect.mock.calls.length).toBeLessThanOrEqual(total);
++  });
++});
+--- a/test/rng.test.ts
++++ b/test/rng.test.ts
+@@ -0,0 +1,25 @@
++import { describe, expect, it } from 'vitest';
++import { createRng } from '../src/rng';
++
++describe('createRng', () => {
++  it('same seed -> same sequence, different seed -> different', () => {
++    const a = createRng(42), b = createRng(42), c = createRng(43);
++    const sa = Array.from({ length: 5 }, a), sb = Array.from({ length: 5 }, b), sc = Array.from({ length: 5 }, c);
++    expect(sa).toEqual(sb);
++    expect(sa).not.toEqual(sc);
++  });
++
++  it('stays inside [0, 1)', () => {
++    const r = createRng(7);
++    for (let i = 0; i < 1000; i++) {
++      const v = r();
++      expect(v).toBeGreaterThanOrEqual(0);
++      expect(v).toBeLessThan(1);
++    }
++  });
++
++  it('falls back to Math.random without a (valid) seed', () => {
++    expect(createRng()).toBe(Math.random);
++    expect(createRng(NaN)).toBe(Math.random);
++  });
++});
+--- a/test/swarm.test.ts
++++ b/test/swarm.test.ts
+@@ -97,3 +97,30 @@
+     expect(SwarmCursors.version).toBe('test');
+   });
+ });
++
++describe('tour', () => {
++  const tourBtn = () => host()!.shadowRoot!.querySelector('[data-a=tour]')!;
++
++  it('`tour: true` starts with the tour on; Space and the button toggle it', () => {
++    start({ ...quiet, tour: true });
++    expect(tourBtn().classList.contains('on')).toBe(true);
++    dispatchEvent(new KeyboardEvent('keydown', { key: ' ', cancelable: true }));
++    expect(tourBtn().classList.contains('on')).toBe(false);
++    (tourBtn() as HTMLElement).click();
++    expect(tourBtn().classList.contains('on')).toBe(true);
++  });
++
++  it('Space does nothing while typing in a field', () => {
++    start(quiet);
++    const input = document.createElement('input');
++    document.body.appendChild(input);
++    input.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
++    expect(tourBtn().classList.contains('on')).toBe(false);
++  });
++
++  it('the speed button matching `speed` starts highlighted', () => {
++    start({ ...quiet, speed: 2 });
++    const on = host()!.shadowRoot!.querySelector('.seg .on')!;
++    expect((on as HTMLElement).dataset.a).toBe('s2');
++  });
++});

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Swarm Cursors demo</title>
+<style>
+  body{margin:0;font:16px/1.6 system-ui,sans-serif;background:#faf7f2;color:#222}
+  nav{display:flex;gap:20px;align-items:center;padding:16px 40px;border-bottom:1px solid #ddd}
+  nav b{margin-right:auto;font-size:20px}
+  .hero{padding:80px 40px;max-width:760px}
+  .hero h1{font-size:48px;line-height:1.1;margin:0 0 16px}
+  .btn{display:inline-block;padding:12px 22px;background:#111;color:#fff;border-radius:10px;text-decoration:none}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;padding:0 40px 60px}
+  .card{background:#fff;border:1px solid #e3ded4;border-radius:16px;padding:20px;box-shadow:0 6px 20px #0001}
+  .card img{width:100%;height:140px;border-radius:10px;display:block;margin-bottom:12px}
+  footer{padding:40px;background:#111;color:#bbb}
+</style>
+</head>
+<body>
+<nav><b>Demo</b><a href="#">Giới thiệu</a><a href="#">Dự án</a><a href="#">Liên hệ</a></nav>
+<section class="hero">
+  <h1>Một trang web tự dựng lại chính nó</h1>
+  <p>Nhấn Alt+Shift+S hoặc bấm nút bên dưới. Cuộn xuống để bầy con trỏ đuổi theo bạn.</p>
+  <a class="btn" href="#" onclick="runDemo();return false">Chạy hiệu ứng</a>
+</section>
+<section class="grid">
+  <div class="card"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='140'%3E%3Cdefs%3E%3ClinearGradient id='g'%3E%3Cstop offset='0' stop-color='%23ff7a59'/%3E%3Cstop offset='1' stop-color='%23ffc371'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='400' height='140' fill='url(%23g)'/%3E%3C/svg%3E"><h3>Thẻ một</h3><p>Mô tả ngắn cho thẻ đầu tiên.</p></div>
+  <div class="card"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='140'%3E%3Crect width='400' height='140' fill='%2320b2ff'/%3E%3C/svg%3E"><h3>Thẻ hai</h3><p>Mô tả ngắn cho thẻ thứ hai.</p></div>
+  <div class="card"><img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='140'%3E%3Crect width='400' height='140' fill='%232ecc71'/%3E%3C/svg%3E"><h3>Thẻ ba</h3><p>Mô tả ngắn cho thẻ thứ ba.</p></div>
+</section>
+<footer>© 2026 Demo</footer>
+<script src="../dist/swarm-cursors.js" data-labels='{"tour":"Tham quan","autoScroll":"Tự cuộn","ready":"Sẵn sàng","done":"Xong","replay":"Chạy lại","goLive":"Vào trang","sound":"Âm thanh","close":"Đóng"}'></script>
+<script>
+  // nhãn tiếng Việt cho cả lần chạy bằng nút (phím tắt đã đọc data-labels ở trên)
+  window.runDemo = () => SwarmCursors.start({
+    labels: { tour: 'Tham quan', autoScroll: 'Tự cuộn', ready: 'Sẵn sàng', building: (p) => `Đang dựng ${p}%`, done: 'Xong', replay: 'Chạy lại', goLive: 'Vào trang', sound: 'Âm thanh', close: 'Đóng' },
+    onFinish: () => console.log('swarm: xong'),
+  });
+</script>
+<script>
+  // dev server only (npm run dev): reload when esbuild rebuilds
+  if (location.hostname === 'localhost') new EventSource('/esbuild').addEventListener('change', () => location.reload());
+</script>
+</body>
+</html>
