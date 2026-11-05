@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Runs on any website**: `npm run build` now also writes `dist/swarm-cursors.user.js`, a self-contained userscript (`@match *://*/*`) for Tampermonkey / Violentmonkey in any browser:
+  <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> / <kbd>P</kbd> work and `?swarm` in the address starts it. README has a new "Run it on any website" section (extension, userscript, console).
+
 ## 2.13
 
 - **Shorter runs**: a free cursor no longer waits behind a box that is still being drawn. It looks at the next few waiting tasks, skips the ones whose parent is unfinished

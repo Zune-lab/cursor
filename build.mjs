@@ -37,6 +37,22 @@ if (watch) {
   writeFileSync('dist/extension/manifest.json', JSON.stringify(manifest, null, 2) + '\n');
   copyFileSync('extension/background.js', 'dist/extension/background.js');
   copyFileSync('dist/swarm-cursors.min.js', 'dist/extension/swarm-cursors.js');
+  // userscript (Tampermonkey / Violentmonkey / Greasemonkey): runs on every site, Alt+Shift+S / Alt+Shift+P work, ?swarm starts it
+  const header = [
+    '// ==UserScript==',
+    '// @name         Swarm Cursors',
+    '// @namespace    https://github.com/Zune-lab/cursor',
+    `// @version      ${pkg.version}`,
+    '// @description  Blank any page, then a swarm of multiplayer cursors rebuilds it live. Alt+Shift+S toggles, Alt+Shift+P picks a section, ?swarm in the address starts it.',
+    '// @match        *://*/*',
+    '// @run-at       document-idle',
+    '// @noframes',
+    '// @grant        none',
+    '// ==/UserScript==',
+    '',
+  ].join('\n');
+  const boot = `\n;(function () { var S = window.SwarmCursors; if (S && new URLSearchParams(location.search).has('swarm')) S.start(); })();\n`;
+  writeFileSync('dist/swarm-cursors.user.js', header + readFileSync('dist/swarm-cursors.min.js', 'utf8').replace(/\/\/# sourceMappingURL=.*$/m, '') + boot);
   // one bundled declaration file
   execFileSync('npx', ['dts-bundle-generator', '--no-banner', '--project', 'tsconfig.json', '-o', 'dist/index.d.ts', 'src/index.ts'], { stdio: 'inherit' });
 }

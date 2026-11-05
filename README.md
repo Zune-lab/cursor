@@ -76,6 +76,18 @@ const unbind = bindHotkey(() => ({ sound: false })); // Alt+Shift+S toggles, Alt
 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> on any page; <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> lets you click one section to rebuild instead of the whole page. Chrome's own pages, the Web Store and the PDF viewer can't be scripted (badge shows ×).
 The extension also takes one screenshot of the tab (`captureVisibleTab`, covered by `activeTab`) so media the page won't let us read can be shown as an image.
 
+## Run it on any website
+
+Three ways, none needs the site's cooperation. The Chrome extension also screenshots canvases / videos / iframes the page won't let a script read; the other two show a placeholder there.
+
+| way | works in | how |
+|---|---|---|
+| **Chrome extension** | Chrome, Edge, Brave, Opera, Arc | `npm run build`, then `chrome://extensions` -> Developer mode -> **Load unpacked** -> `dist/extension`. Toolbar icon or <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> |
+| **Userscript** | any browser with Tampermonkey / Violentmonkey (Chrome, Firefox, Edge, Safari, Kiwi / Firefox on Android) | `npm run build`, then open `dist/swarm-cursors.user.js` in the manager (or paste it into a new script). Runs on every `http(s)` page: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> toggles, <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> picks a section, `?swarm` at the end of the address starts it |
+| **DevTools console** | any | paste the contents of `dist/swarm-cursors.min.js`, then `SwarmCursors.start()` |
+
+Pages that forbid scripting (`chrome://`, the Web Store, the PDF viewer) can't be rebuilt by any of them.
+
 ## Features
 
 **Rebuilding**
@@ -168,6 +180,6 @@ npm run build       # esbuild -> dist/ + bundled index.d.ts
 npm run dev         # esbuild watch + dev server: http://localhost:5173/demo/ (auto-reloads on save)
 ```
 
-Build output: `dist/swarm-cursors.js` (IIFE), `.min.js` (+ map), `.mjs` (ESM), `index.d.ts`.
+Build output: `dist/swarm-cursors.js` (IIFE), `.min.js` (+ map), `.mjs` (ESM), `.user.js` (userscript), `extension/`, `index.d.ts`.
 Open `demo/index.html` after building.
 
