@@ -26,12 +26,16 @@ export interface Labels {
 }
 
 export interface SwarmOptions {
-  /** Number of cursors that start building. Default 6. */
+  /** Number of cursors that start building. Default 6 (4 on a phone); a big page gets more, see `maxAgents`. */
   agents?: number;
+  /** Ceiling for the swarm size. With `adaptive`, a bigger page starts with more cursors (about one extra per 150 elements) and more join while a big backlog waits. Default 14 (8 on a phone). */
+  maxAgents?: number;
   /** Idle cursors take over chores from busy ones (carrying a typed text frame home) so the busy one can move on. Default true. */
   teamwork?: boolean;
-  /** Type each text box in an empty spot nearby, then drag the finished frame into place. Default true. */
-  stageText?: boolean;
+  /** Type some text boxes in an empty spot nearby, then drag the finished frame into place; the rest are typed where they belong. `true` = about 15% of them, a number 0..1 sets the share, `false` = none. Default true. */
+  stageText?: boolean | number;
+  /** Speed up automatically (up to 3x, and without the text-staging detour) while a big backlog of unlocked work is waiting, so a dense page does not take forever. Default true. */
+  adaptive?: boolean;
   /** Animation speed multiplier (1, 2, 3 in the toolbar). Default 1. */
   speed?: number;
   /** Play the pentatonic build sounds. Default true. */
@@ -90,6 +94,8 @@ export interface TaskBase {
   /** Sort key: top edge, but never earlier than the parent's key. */
   key: number;
   done?: boolean;
+  /** A cursor has picked this task up (or it was placed without one); the queue skips it. */
+  taken?: boolean;
   /** Set when a repeated sibling should be Alt-dragged from this master box. */
   dupFrom?: Box;
   /** Set on the first text of a shared left edge: a ruler guide is dragged there first. */

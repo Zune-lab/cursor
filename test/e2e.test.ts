@@ -81,7 +81,7 @@ describe('staged text', () => {
 
   it('ends exactly where the page had each text, after being dragged into place', async () => {
     document.body.innerHTML = texts;
-    const h = start({ agents: 2, speed: 60, sound: false, fx: false });
+    const h = start({ agents: 2, speed: 60, sound: false, fx: false, stageText: 1 });
     const spawns = watchSpawns();
     await expect(h.done).resolves.toBe('finished');
     expect(finalBoxes()).toEqual([...HOME].sort());
@@ -102,6 +102,28 @@ describe('staged text', () => {
   }, 30000);
 });
 
+describe('staged text, default share', () => {
+  it('most text is typed right where it belongs, only a few are dragged home', async () => {
+    const n = 40;
+    const homes = new Set(Array.from({ length: n }, (_, i) => `60,${10 + i * 17}`)); // all inside the first screen, so nothing stays locked
+    document.body.innerHTML = Array.from({ length: n }, (_, i) => `<p data-box="60,${10 + i * 17},300,16">Paragraph number ${i} to type</p>`).join('');
+    const h = start({ agents: 3, speed: 60, seed: 5, sound: false, fx: false });
+    const spawns: string[] = [];
+    new MutationObserver((list) => {
+      for (const m of list)
+        m.addedNodes.forEach((x) => {
+          const el = x as HTMLElement;
+          if (el.classList?.contains('txt')) spawns.push(`${parseFloat(el.style.left)},${parseFloat(el.style.top)}`);
+        });
+    }).observe(document.querySelector('[data-swarm]')!.shadowRoot!, { subtree: true, childList: true });
+    await expect(h.done).resolves.toBe('finished');
+    const home = spawns.filter((p) => homes.has(p)).length;
+    expect(spawns.length).toBe(n);
+    expect(home / n).toBeGreaterThanOrEqual(0.7);
+    h.stop();
+  }, 60000);
+});
+
 describe('teamwork', () => {
   // a big text first, and a box far below the fold that stays locked until the viewer scrolls: so the cursor that types the text
   // "has more to build" while the other cursors have nothing to do
@@ -115,7 +137,7 @@ describe('teamwork', () => {
   const observe = async (opts: Record<string, unknown>): Promise<Seen> => {
     document.body.innerHTML = page;
     const seen: Seen = { helping: false, home: false };
-    const h = start({ agents: 4, speed: 60, sound: false, fx: false, ...opts });
+    const h = start({ agents: 4, speed: 60, sound: false, fx: false, stageText: 1, ...opts });
     const root = document.querySelector('[data-swarm]')!.shadowRoot!;
     new MutationObserver((list) => {
       for (const m of list) if ((m.target.textContent ?? '').startsWith('Helping ')) seen.helping = true;
@@ -148,7 +170,7 @@ describe('teamwork', () => {
 
   it('a hand-off never leaves the run unfinished or a helper stuck in a pose', async () => {
     document.body.innerHTML = `<h1 data-box="40,40,500,80">Typed in the wrong place</h1><p data-box="40,140,400,60">And another paragraph that needs carrying</p>`;
-    const h = start({ agents: 4, speed: 60, sound: false, fx: false, seed: 1 });
+    const h = start({ agents: 4, speed: 60, sound: false, fx: false, seed: 1, stageText: 1 });
     await expect(h.done).resolves.toBe('finished');
     const root = document.querySelector('[data-swarm]')!.shadowRoot!;
     expect(root.querySelector('.cur[data-m="cross"]')).toBeNull();

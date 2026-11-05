@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.13
+
+- **Shorter runs**: a free cursor no longer waits behind a box that is still being drawn. It looks at the next few waiting tasks, skips the ones whose parent is unfinished
+  (only a box's own children wait for it) and takes the nearest of the rest, so there is less idle time and less travelling. Layers have their own z-index, so the picture is unchanged.
+- **Catch-up** (`adaptive: true` / `data-adaptive="off"` to disable): while a lot of unlocked work is waiting per cursor, everyone speeds up smoothly (up to 3x) and text is typed in place
+  instead of staged. A dense page of 90 blocks went from 8.0 s to 4.9 s in the test; small pages run at exactly the pace you set.
+- **The bigger the page, the more cursors**: the run starts with one extra cursor per ~150 elements found (estimated from the first scan), and while more than ~12 unlocked tasks wait per cursor
+  another one joins (every 0.45 s), up to `maxAgents` (default 14, 8 on a phone). On a 300-block page this took a run from 8.4 s to 2.1 s (2 -> 7 cursors). `adaptive: false` keeps exactly `agents`;
+  `data-max-agents="N"` sets the ceiling from a `<script>` tag.
+- **Big swarms look distinct**: the default colors are extended with evenly spread hues and the default names to 14, so no two cursors share a color or a name unless you pass your own `colors` / `names`.
+- **No polling**: waiting cursors sleep until something happens (scroll, a finished task, newly scanned tasks, `stop()`) instead of waking every 40-60 ms.
+- **Only a few texts are dragged home**: staging now applies to about 15% of the text boxes (`stageText: 0.3` for 30%, `stageText: 1` for all, `false` for none); the rest are typed right in place.
+- **Lighter on the page**: the toolbar progress is repainted once per frame (not once per task), cursors skip style writes that did not change (name tag text, tiny arrow lean),
+  the idle-cursor list is no longer rebuilt every frame, sounds share one stereo panner per position, and key clicks are rate-limited (fast typing by many cursors no longer floods the audio graph).
+- Cleanup: one `lineGeom` shared by the pen tool and the instant placement, one `selectionBox` helper, one `labels()` merge.
+
 ## 2.12
 
 - **Smarter teamwork** (replaces the two-cursors-draw-one-box idea of 2.11, which never saved any time): a cursor that has typed a text box in the wrong place *and still has more to build*

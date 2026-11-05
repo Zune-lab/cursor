@@ -48,6 +48,28 @@ describe('AudioEngine', () => {
     expect(osc.start).toHaveBeenCalledTimes(1);
   });
 
+  it('shares one panner per pan position instead of creating two nodes for every sound', () => {
+    const { ctx } = fakeContext();
+    const make = vi.fn(ctx.createStereoPanner);
+    ctx.createStereoPanner = make;
+    vi.stubGlobal('AudioContext', function () { return ctx; });
+    const a = new AudioEngine(true);
+    for (let i = 0; i < 10; i++) a.tone(440, 0.1, 'sine', 0.1, 0.5);
+    a.tone(440, 0.1, 'sine', 0.1, -0.5);
+    expect(make).toHaveBeenCalledTimes(2);
+  });
+
+  it('key sounds are rate-limited so fast typing cannot flood the audio graph', () => {
+    const { ctx, osc } = fakeContext();
+    vi.stubGlobal('AudioContext', function () { return ctx; });
+    const a = new AudioEngine(true);
+    a.key(0);
+    const first = osc.start.mock.calls.length;
+    a.key(0);
+    a.key(0);
+    expect(osc.start.mock.calls.length).toBe(first);
+  });
+
   it('is a silent no-op without WebAudio', () => {
     vi.stubGlobal('AudioContext', undefined);
     const a = new AudioEngine(true);

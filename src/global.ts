@@ -13,6 +13,7 @@ export function optionsFromScript(el: HTMLElement | null): SwarmOptions {
   if (!el) return o;
   const d = el.dataset;
   if (d.agents && +d.agents > 0) o.agents = +d.agents;
+  if (d.maxAgents && +d.maxAgents > 0) o.maxAgents = +d.maxAgents;
   if (d.speed && +d.speed > 0) o.speed = +d.speed;
   if (d.sound === 'off') o.sound = false;
   if (d.fx === 'off') o.fx = false;
@@ -25,6 +26,7 @@ export function optionsFromScript(el: HTMLElement | null): SwarmOptions {
   if (d.blueprint === 'on') o.blueprint = true;
   if (d.stage === 'off') o.stageText = false;
   if (d.teamwork === 'off') o.teamwork = false;
+  if (d.adaptive === 'off') o.adaptive = false;
   if (d.labels) {
     try {
       o.labels = JSON.parse(d.labels) as Partial<Labels>;

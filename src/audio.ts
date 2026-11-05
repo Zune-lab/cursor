@@ -18,6 +18,8 @@ export class AudioEngine {
   private t0 = 0;
   private lastSlot = 0;
   private lastTick = 0;
+  private lastKey = 0;
+  private readonly panners = new Map<number, StereoPannerNode>(); // one panner per pan step, shared by every sound
   private closed = false;
   private unlock: (() => void) | null = null;
 
@@ -58,10 +60,15 @@ export class AudioEngine {
 
   private out(ac: AudioContext, g: GainNode, pan: number): void {
     if (typeof ac.createStereoPanner === 'function') {
-      const p = ac.createStereoPanner();
-      p.pan.value = clamp(pan, -1, 1);
+      const step = Math.round(clamp(pan, -1, 1) * 8); // 17 positions are plenty, and it saves two nodes per sound
+      let p = this.panners.get(step);
+      if (!p) {
+        p = ac.createStereoPanner();
+        p.pan.value = step / 8;
+        p.connect(ac.destination);
+        this.panners.set(step, p);
+      }
       g.connect(p);
-      p.connect(ac.destination);
     } else {
       g.connect(ac.destination);
     }
@@ -114,6 +121,9 @@ export class AudioEngine {
   /** Mechanical keyboard: sharp click over a short thock; deeper on the space bar. */
   key(pan: number, deep = false): void {
     if (!this.enabled) return;
+    const now = performance.now();
+    if (now - this.lastKey < 22) return; // many cursors typing fast would otherwise flood the audio graph
+    this.lastKey = now;
     const ac = this.context();
     if (!ac) return;
     this.burst(ac, 0.02, 2600 + Math.random() * 1400, 1.2, 0.05, pan);
@@ -210,6 +220,7 @@ export class AudioEngine {
     }
     const ac = this.ctx;
     this.ctx = null;
+    this.panners.clear();
     if (ac) {
       ac.onstatechange = null;
       if (ac.state !== 'closed') ac.close().catch(() => undefined);

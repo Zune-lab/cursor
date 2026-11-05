@@ -22,6 +22,8 @@ until the page looks like itself again. Zero runtime dependencies, ~48 kB minifi
 | `data-exclude=".ads, #cookie"` | CSS selector of things to leave out |
 | `data-teamwork="off"` | every cursor works alone |
 | `data-stage="off"` | type text where it belongs instead of dragging it there afterwards |
+| `data-adaptive="off"` | never speed up or add cursors on a dense page (see `adaptive`) |
+| `data-max-agents="N"` | most cursors the swarm may grow to on a big page (default 14, 8 on a phone) |
 | `data-blueprint="on"` | show the dashed blueprint |
 | `data-target="#hero"` | run on one section only (the rest of the page stays live) |
 | `data-max-tasks="5000"` `data-prime="off"` `data-tour="on"` | cap on rebuilt elements / skip the hidden scroll pass / start touring |
@@ -43,7 +45,7 @@ const unbind = bindHotkey(() => ({ sound: false })); // Alt+Shift+S toggles, Alt
 
 | option | default | |
 |---|---|---|
-| `agents` | `6` (`4` under 640px) | cursors that start building (fast scrolling summons up to 6 more) |
+| `agents` | `6` (`4` under 640px) | cursors that start building (fast scrolling summons up to 6 more, and a big page grows the swarm up to `maxAgents`) |
 | `speed` | `1` | speed multiplier |
 | `tour` | `false` | start with the auto-scroll tour already running (<kbd>Space</kbd> toggles it) |
 | `seed` | – | makes cursor motion reproducible (screen recordings, tests) |
@@ -55,7 +57,9 @@ const unbind = bindHotkey(() => ({ sound: false })); // Alt+Shift+S toggles, Alt
 | `maxTasks` | `20000` | cap on rebuilt elements (the page is scanned lazily, so this is only a safety net) |
 | `prime` | `true` | scroll the first few screens once (hidden) so lazy images / reveal-on-scroll content exist; the rest wakes up as you scroll |
 | `teamwork` | `true` | an idle cursor carries a typed text frame home so the cursor that typed it can move on to its next task |
-| `stageText` | `true` | type each text box in a nearby spot first, then drag the finished frame into place (`false`: type it where it belongs) |
+| `adaptive` | `true` | a big page gets more cursors (about one extra per 150 elements at the start, and more join while a backlog waits), and while many unlocked elements still wait per cursor everyone speeds up (up to 3×) and text is typed in place, so a dense or huge page does not take forever; small pages are untouched |
+| `maxAgents` | `14` (`8` on a phone) | ceiling for how many cursors the swarm may grow to (`agents` is how many start) |
+| `stageText` | `true` | a few text boxes (~15%) are typed in a nearby spot first, then dragged into place; the rest are typed where they belong. A number `0..1` sets the share, `false` = none |
 | `captureMedia` | `true` | Chrome extension only: screenshot canvases / videos / iframes the page won't let us read (those on screen when it starts) |
 | `blueprint` | `false` | dashed outline for blocks still waiting for a cursor |
 | `target` | – | CSS selector or element: blank and rebuild only this section, the rest of the page stays live (a selector that matches nothing falls back to the whole page) |

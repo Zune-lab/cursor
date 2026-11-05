@@ -20,8 +20,10 @@ describe('global entry', () => {
     const s = document.createElement('script');
     s.dataset.agents = '9';
     s.dataset.sound = 'off';
+    s.dataset.adaptive = 'off';
+    s.dataset.maxAgents = '12';
     s.dataset.labels = '{"tour":"Tham quan"}';
-    expect(optionsFromScript(s)).toEqual({ agents: 9, sound: false, labels: { tour: 'Tham quan' } });
+    expect(optionsFromScript(s)).toEqual({ agents: 9, sound: false, adaptive: false, maxAgents: 12, labels: { tour: 'Tham quan' } });
     s.dataset.labels = '{nope';
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(optionsFromScript(s).labels).toBeUndefined();

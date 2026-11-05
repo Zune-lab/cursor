@@ -1,5 +1,5 @@
 import { AudioEngine } from './audio';
-import { ACCENT, COLORS, DEFAULT_MAX_TASKS, NAMES, RADII } from './constants';
+import { ACCENT, DEFAULT_MAX_TASKS, NAMES, RADII, palette } from './constants';
 import { Cursor } from './cursor';
 import { EGGS, eggTarget, type EggKind } from './egg';
 import { flockStep } from './flock';
@@ -21,6 +21,29 @@ const SELECT_HANDLES = [[0, 0], [50, 0], [100, 0], [0, 50], [100, 50], [0, 100],
 /** Blueprints are only drawn for blocks this big, and never more than this many at once. */
 const BP_MIN_AREA = 1500;
 const BP_MAX = 40;
+/** A free cursor looks at this many waiting tasks to find one that is not blocked behind an unfinished parent box. */
+/** Share of the (big enough) text boxes that are typed in a spare spot and dragged home; the rest are typed right where they belong. */
+const STAGE_CHANCE = 0.15;
+const PICK_WINDOW = 8;
+/** Queue-position penalty (px of travel) when picking the nearest task: the oldest waiting task wins unless another is clearly closer. */
+const PICK_PENALTY = 60;
+/** Catch-up: up to `CATCHUP_SCAN` unlocked tasks are counted; above `CATCHUP_FREE` per cursor everyone speeds up by `CATCHUP_GAIN` per extra task, up to `MAX_BOOST`. */
+const CATCHUP_SCAN = 240;
+const CATCHUP_FREE = 8;
+const CATCHUP_GAIN = 0.08;
+const MAX_BOOST = 3;
+/** Above this boost, text is typed in place (no staging detour) and nobody stops to think. */
+const HURRY = 1.5;
+/** Bigger pages get more cursors: one extra per this many estimated elements when the run starts... */
+const TASKS_PER_EXTRA = 150;
+/** ...and while running, one more joins (at most every `GROW_EVERY` ms) when this many unlocked tasks wait per cursor. */
+const GROW_AT = 12;
+const GROW_EVERY = 450;
+/** Default ceiling for the swarm size (desktop / phone). */
+const MAX_AGENTS = 14;
+const MAX_AGENTS_SMALL = 8;
+/** Longest a waiting cursor sleeps without being woken by an event. */
+const PARK_MS = 100;
 const nextFrame = (): Promise<void> => new Promise((r) => raf(() => r()));
 
 /** `target` option -> element. A selector that matches nothing falls back to the whole page (with a warning). */
@@ -44,6 +67,20 @@ function effectiveBg(el: Element): string {
     if (!isTransparent(c)) return c;
   }
   return '#fff';
+}
+
+/** Final box of a pen line (a thin rectangle) and its direction. */
+function lineGeom(t: LineTask): Box & { horiz: boolean } {
+  const [x1, y1, x2, y2] = t.pts;
+  const th = Math.max(1, t.lw);
+  const horiz = Math.abs(x2 - x1) >= Math.abs(y2 - y1);
+  return {
+    x: Math.min(x1, x2) - (horiz ? 0 : th / 2),
+    y: Math.min(y1, y2) - (horiz ? th / 2 : 0),
+    w: horiz ? Math.abs(x2 - x1) : th,
+    h: horiz ? th : Math.abs(y2 - y1),
+    horiz,
+  };
 }
 
 export interface SwarmHooks {
@@ -70,6 +107,8 @@ export class Swarm {
   private scanDone = false;
   private bandH = 0;
   private prog = 0;
+  private progDirty = false;
+  private readonly idleBuf: Cursor[] = []; // scratch list for followMouse (no allocation per frame)
   private readonly working = new Set<Cursor>(); // cursors in the middle of a task; the rest follow the real mouse
   private lastScroll = 0;
   private hiddenAt = 0; // when the tab went to the background (0 = visible)
@@ -79,7 +118,13 @@ export class Swarm {
   private dead = false;
   private finished = false;
   private speed: number;
+  /** Catch-up factor (1..MAX_BOOST) while a big backlog of unlocked work waits; multiplies `speed` in every animation. */
+  private boost = 1;
+  private readonly parked = new Set<() => void>(); // cursors waiting for something to happen (see `park` / `wake`)
   private readonly nAgents: number;
+  private readonly maxAgents: number;
+  private backlog = 0; // unlocked, untaken tasks per cursor (from updateBoost)
+  private lastGrow = 0;
   private total: number;
   private spawned = 0;
   private qi = 0; // next task index
@@ -114,8 +159,9 @@ export class Swarm {
     this.rand = createRng(opts.seed);
     this.nAgents = Math.max(1, Math.floor(opts.agents ?? (window.innerWidth < 640 ? 4 : 6)));
     this.total = this.nAgents;
+    this.maxAgents = Math.max(this.nAgents, Math.floor(opts.maxAgents ?? (window.innerWidth < 640 ? MAX_AGENTS_SMALL : MAX_AGENTS)));
     this.speed = opts.speed && opts.speed > 0 ? opts.speed : 1;
-    this.colors = opts.colors?.length ? opts.colors : COLORS;
+    this.colors = opts.colors?.length ? opts.colors : palette(this.maxAgents);
     this.names = opts.names?.length ? opts.names : NAMES;
     this.target = resolveTarget(opts.target);
     this.scanner = new Scanner({ maxTasks: opts.maxTasks ?? DEFAULT_MAX_TASKS, exclude: opts.exclude, root: this.target ?? undefined, stills: this.stills });
@@ -132,7 +178,7 @@ export class Swarm {
       this.coveredTo = region.y;
       this.pageH = region.y + region.h;
     }
-    this.ui = new Ui(bg, size.w, size.h, { ...DEFAULT_LABELS, ...opts.labels }, region);
+    this.ui = new Ui(bg, size.w, size.h, this.labels(), region);
     this.audio = new AudioEngine(opts.sound !== false, (locked) => this.ui.setSoundLocked(locked));
     this.ui.setSound(this.audio.enabled);
     const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -175,6 +221,8 @@ export class Swarm {
     this.last = now;
     const k = dt / 16.7;
     if (!this.scanDone && !this.orbiting && this.coveredTo < this.vp.y + this.vp.h * LOOKAHEAD) this.scanNext();
+    if (this.progDirty) this.flushProgress();
+    this.advance();
     const more = this.qi < this.tasks.length || !this.scanDone;
     if (this.tour && more && !(this.target && this.vp.y + this.vp.h >= this.pageH)) {
       const idle = 1 - Math.min(1, this.busy / this.total); // busy swarm -> slow down, idle swarm -> speed up
@@ -194,17 +242,26 @@ export class Swarm {
     if (this.sinceSpawn >= 100) {
       this.sinceSpawn = 0;
       if (this.opts.blueprint && !this.orbiting) this.updateBlueprints();
+      if (!this.orbiting) this.updateBoost();
       const v = Math.abs(this.vp.y - this.lastY) * 10; // px/s
       this.lastY = this.vp.y;
-      if (v > 800 && this.spawned < 6 && !this.finished && !this.orbiting && more) {
-        const c = this.addCursor();
-        this.total++;
-        this.spawned++;
-        void this.agent(c);
+      if (!this.finished && !this.orbiting && more && this.total < this.maxAgents) {
+        if (v > 800 && this.spawned < 6) {
+          this.spawned++;
+          this.spawn();
+        } else if (this.opts.adaptive !== false && this.backlog > GROW_AT && now - this.lastGrow > GROW_EVERY) {
+          this.lastGrow = now; // a big page: more hands, one at a time, until the backlog per cursor is back under control
+          this.spawn();
+        }
       }
     }
     raf(this.pump);
   };
+
+  private flushProgress(): void {
+    this.progDirty = false;
+    this.ui.setProgress(this.prog);
+  }
 
   private setTour(on: boolean): void {
     this.tour = on;
@@ -228,7 +285,7 @@ export class Swarm {
     };
     raf(orbit);
 
-    const labels = { ...DEFAULT_LABELS, ...this.opts.labels };
+    const labels = this.labels();
     this.ui.setStatus(labels.preparing);
     await this.mediaReady; // screenshots first: the hidden scroll pass moves the page
     if (this.dead) return;
@@ -250,17 +307,20 @@ export class Swarm {
       if (!this.scanDone && this.coveredTo < this.vp.y + this.vp.h * LOOKAHEAD) await nextFrame();
       if (this.dead) return;
     }
+    this.growForPage();
     this.ui.setStatus(labels.ready);
     this.orbiting = false;
     this.ui.hideFavicon();
     this.audio.arpeggio();
     const initial = [...this.cursors];
-    initial.forEach((c, i) => setTimeout(() => void this.agent(c), i * 120));
+    const gap = Math.min(120, 700 / initial.length);
+    initial.forEach((c, i) => setTimeout(() => void this.agent(c), i * gap));
   }
 
   stop(): void {
     if (this.dead) return;
     this.dead = true;
+    this.wake(); // parked cursors notice at once and leave
     this.blueprints.clear();
     document.removeEventListener('visibilitychange', this.onVisibility);
     removeEventListener('mousemove', this.onMove);
@@ -304,6 +364,7 @@ export class Swarm {
     this.vp.y = window.scrollY;
     this.vp.w = window.innerWidth;
     this.vp.h = window.innerHeight;
+    this.wake(); // scrolling may unlock tasks
   };
 
   private onMove = (e: MouseEvent): void => {
@@ -352,7 +413,7 @@ export class Swarm {
     for (let i = this.qi; i < this.tasks.length && i < this.qi + 120 && this.blueprints.size < BP_MAX; i++) {
       const t = this.tasks[i];
       if (t.key > limit) break;
-      if (t.kind === 'line' || t.done || this.blueprints.has(t) || t.b.w * t.b.h < BP_MIN_AREA || t.b.y + t.b.h < top) continue;
+      if (t.kind === 'line' || t.taken || t.done || this.blueprints.has(t) || t.b.w * t.b.h < BP_MIN_AREA || t.b.y + t.b.h < top) continue;
       const d = document.createElement('div');
       d.className = 'bp';
       Object.assign(d.style, { left: `${t.b.x}px`, top: `${t.b.y}px`, width: `${t.b.w}px`, height: `${t.b.h}px` });
@@ -438,7 +499,7 @@ export class Swarm {
     const x0 = c.x, y0 = c.y, d = Math.hypot(x - x0, y - y0) || 1;
     const nx = -(y - y0) / d, ny = (x - x0) / d;
     const bend = (this.rand() - 0.5) * Math.min(120, d * 0.25);
-    return this.tween(Math.min(1100, 180 + d * 0.9) / (this.speed * c.persona.pace), (e) => {
+    return this.tween(Math.min(1100, 180 + d * 0.9) / (this.rate * c.persona.pace), (e) => {
       const k = Math.sin(Math.PI * e) * bend;
       c.set(x0 + (x - x0) * e + nx * k, y0 + (y - y0) * e + ny * k);
     });
@@ -455,6 +516,7 @@ export class Swarm {
     }
     if (this.coveredTo >= this.pageH) {
       this.scanDone = true;
+      this.wake();
       return;
     }
     const t0 = performance.now();
@@ -464,6 +526,7 @@ export class Swarm {
     for (const t of found) this.tasks.push(t);
     this.coveredTo = bottom;
     if (last || this.scanner.capped) this.scanDone = true;
+    if (found.length || this.scanDone) this.wake();
     const dt = performance.now() - t0;
     if (dt > 24) this.bandH = Math.max(this.vp.h, this.bandH * 0.6);
     else if (dt < 6) this.bandH = Math.min(this.vp.h * 6, this.bandH * 1.5);
@@ -476,8 +539,9 @@ export class Swarm {
     const est = this.scanDone ? n : n * ((this.pageH - this.startY) / Math.max(1, this.coveredTo - this.startY));
     const p = this.scanDone && this.built >= n ? 1 : Math.min(0.99, this.built / Math.max(1, est));
     this.prog = Math.max(this.prog, p);
-    this.ui.setProgress(this.prog);
+    this.progDirty = true; // the toolbar is repainted once per frame, however many tasks finished in it
     this.opts.onProgress?.(this.prog);
+    this.wake(); // a finished task can unlock its children, or end the run
   }
 
   private dot(x: number, y: number): HTMLDivElement {
@@ -492,12 +556,17 @@ export class Swarm {
 
   /** Figma-style selection box that removes itself. */
   private select(b: Box): void {
+    const el = this.selectionBox(b.x, b.y, b.w, b.h);
+    setTimeout(() => el.remove(), 260 / this.rate);
+  }
+
+  private selectionBox(x: number, y: number, w: number, h: number): HTMLDivElement {
     const el = document.createElement('div');
     el.className = 'sel';
-    Object.assign(el.style, { left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px` });
+    Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
     el.innerHTML = SELECT_HANDLES;
     this.ui.layer.appendChild(el);
-    setTimeout(() => el.remove(), 260 / this.speed);
+    return el;
   }
 
   /* ---------- tools ---------- */
@@ -505,8 +574,7 @@ export class Swarm {
   /** Pen tool: anchor point, rubber band to the cursor, anchor point. */
   private async penLine(c: Cursor, t: LineTask): Promise<void> {
     const [x1, y1, x2, y2] = t.pts;
-    const th = Math.max(1, t.lw);
-    const horiz = Math.abs(x2 - x1) >= Math.abs(y2 - y1);
+    const g = lineGeom(t);
     await this.moveTo(c, x1, y1);
     if (this.dead) return;
     c.mode('cross');
@@ -514,23 +582,23 @@ export class Swarm {
     const l = document.createElement('div');
     Object.assign(l.style, {
       position: 'absolute',
-      left: `${Math.min(x1, x2) - (horiz ? 0 : th / 2)}px`,
-      top: `${Math.min(y1, y2) - (horiz ? th / 2 : 0)}px`,
-      width: horiz ? '0px' : `${th}px`,
-      height: horiz ? `${th}px` : '0px',
+      left: `${g.x}px`,
+      top: `${g.y}px`,
+      width: g.horiz ? '0px' : `${g.w}px`,
+      height: g.horiz ? `${g.h}px` : '0px',
       background: ACCENT,
       zIndex: String(t.order),
     });
     this.ui.layer.appendChild(l);
     const a = this.dot(x1, y1);
-    await this.tween(Math.min(900, 200 + Math.hypot(x2 - x1, y2 - y1) * 0.5) / this.speed, (e) => {
-      if (horiz) l.style.width = `${Math.abs(x2 - x1) * e}px`;
-      else l.style.height = `${Math.abs(y2 - y1) * e}px`;
+    await this.tween(Math.min(900, 200 + Math.hypot(x2 - x1, y2 - y1) * 0.5) / this.rate, (e) => {
+      if (g.horiz) l.style.width = `${g.w * e}px`;
+      else l.style.height = `${g.h * e}px`;
       c.set(x1 + (x2 - x1) * e, y1 + (y2 - y1) * e);
     });
     const z = this.dot(x2, y2);
     this.audio.press(this.pan(c));
-    await sleep(120 / this.speed);
+    await sleep(120 / this.rate);
     l.style.background = t.color;
     a.remove();
     z.remove();
@@ -545,7 +613,7 @@ export class Swarm {
     this.ui.setRuler(true);
     await this.moveTo(c, this.vp.x + 10, y);
     c.tint(true);
-    await this.tween(500 / this.speed, (e) => {
+    await this.tween(500 / this.rate, (e) => {
       const gx = this.vp.x + (x - this.vp.x) * e;
       g.style.left = `${gx}px`;
       c.set(gx, y);
@@ -554,7 +622,7 @@ export class Swarm {
     c.reset();
     this.ui.setRuler(false);
     this.audio.snap(this.pan(c));
-    setTimeout(() => g.remove(), 1500 / this.speed);
+    setTimeout(() => g.remove(), 1500 / this.rate);
   }
 
   /* ---------- task execution ---------- */
@@ -572,16 +640,16 @@ export class Swarm {
         return;
       }
 
-      const k = this.speed * paceFor(c.persona, t.kind); // this cursor's own speed for this kind of work
+      const k = this.rate * paceFor(c.persona, t.kind); // this cursor's own speed for this kind of work
       let deferred = false; // a colleague finishes this task (carries the frame home) after this cursor has moved on
-      if (c.persona.think > 0 && !t.dupFrom) await sleep(c.persona.think / this.speed);
+      if (c.persona.think > 0 && !t.dupFrom && this.boost < HURRY) await sleep(c.persona.think / this.rate);
       if (this.dead) return;
       const m = t.dupFrom;
       const stage = t.kind === 'text' && !m ? this.stagePoint(b) : null; // typed here first, then dragged to b
       const o = stage ?? b;
       await this.moveTo(c, m ? m.x + m.w / 2 : o.x, m ? m.y + m.h / 2 : o.y);
       if (this.dead) return;
-      if (m) { this.select(m); await sleep(150 / this.speed); }
+      if (m) { this.select(m); await sleep(150 / this.rate); }
       if (t.guideX != null) {
         await this.dragGuide(c, t.guideX);
         await this.moveTo(c, o.x, o.y);
@@ -661,6 +729,7 @@ export class Swarm {
 
   /** Is there still something for a cursor to go and build after the task it is on? */
   private hasMoreWork(): boolean {
+    this.advance();
     return this.qi < this.tasks.length || !this.scanDone;
   }
 
@@ -693,6 +762,7 @@ export class Swarm {
     x.tint(false);
     x.reset();
     x.mode('arrow');
+    this.wake();
   }
 
   /** The finishing touch of a task: selection frame, note, progress, sparks. Whoever completes it gets the credit. */
@@ -715,7 +785,7 @@ export class Swarm {
     helper.say(`${this.labels().helping} ${boss.name}`);
     void (async () => {
       try {
-        await this.dragFrame(helper, d, from, b, this.speed * paceFor(helper.persona, 'text'));
+        await this.dragFrame(helper, d, from, b, this.rate * paceFor(helper.persona, 'text'));
         if (!this.dead) this.finishTask(helper, t);
       } catch (err) {
         console.warn('[swarm-cursors] task failed', err);
@@ -731,7 +801,9 @@ export class Swarm {
 
   /** Where a text box is typed before it is dragged home: a free spot near its final place, or null to type it in place. */
   private stagePoint(b: Box): { x: number; y: number } | null {
-    if (this.opts.stageText === false || b.w * b.h < 600) return null; // tiny labels are not worth the detour
+    if (this.opts.stageText === false || this.boost >= HURRY || b.w * b.h < 600) return null; // tiny labels are not worth the detour
+    const chance = typeof this.opts.stageText === 'number' ? clamp(this.opts.stageText, 0, 1) : STAGE_CHANCE;
+    if (this.rand() >= chance) return null; // most text is simply typed in place
     let x0 = this.vp.x + 6;
     let y0 = this.vp.y + 6;
     let x1 = this.vp.x + this.vp.w - 6;
@@ -755,18 +827,14 @@ export class Swarm {
   }
 
   /** Select the finished text frame, grab it and drag it onto its exact place (red distance label, snap on arrival). */
-  private async dragFrame(c: Cursor, d: HTMLDivElement, from: { x: number; y: number }, b: Box, rate = this.speed): Promise<void> {
+  private async dragFrame(c: Cursor, d: HTMLDivElement, from: { x: number; y: number }, b: Box, rate = this.rate): Promise<void> {
     const gx = Math.min(14, b.w / 2);
     const gy = Math.min(10, b.h / 2);
     c.mode('arrow');
-    await sleep(120 / this.speed);
+    await sleep(120 / this.rate);
     await this.moveTo(c, from.x + gx, from.y + gy);
     if (this.dead) return;
-    const sel = document.createElement('div');
-    sel.className = 'sel';
-    Object.assign(sel.style, { left: `${from.x}px`, top: `${from.y}px`, width: `${b.w}px`, height: `${b.h}px` });
-    sel.innerHTML = SELECT_HANDLES;
-    this.ui.layer.appendChild(sel);
+    const sel = this.selectionBox(from.x, from.y, b.w, b.h);
     this.audio.press(this.pan(c));
     c.tint(true);
     const dist = Math.hypot(b.x - from.x, b.y - from.y);
@@ -783,7 +851,7 @@ export class Swarm {
     c.tint(false);
     c.reset();
     this.audio.snap(this.pan(c));
-    setTimeout(() => sel.remove(), 260 / this.speed);
+    setTimeout(() => sel.remove(), 260 / this.rate);
   }
 
   private async fillMedia(d: HTMLDivElement, t: MediaTask, animate = true): Promise<void> {
@@ -818,11 +886,11 @@ export class Swarm {
     }
     d.appendChild(inner);
     if (animate && (t.tag === 'img' || (t.src && t.tag !== 'svg'))) {
-      await this.tween(450 / this.speed, (e) => (inner.style.clipPath = `inset(0 0 ${100 - e * 100}% 0)`));
+      await this.tween(450 / this.rate, (e) => (inner.style.clipPath = `inset(0 0 ${100 - e * 100}% 0)`));
     }
   }
 
-  private async typeText(c: Cursor, d: HTMLDivElement, t: TextTask, rate = this.speed): Promise<void> {
+  private async typeText(c: Cursor, d: HTMLDivElement, t: TextTask, rate = this.rate): Promise<void> {
     c.mode('text');
     d.className = 'pop';
     Object.assign(d.style, t.cs);
@@ -871,15 +939,96 @@ export class Swarm {
 
   /* ---------- scheduling ---------- */
 
-  /** Next task, `'wait'` if nothing is unlocked yet, `null` when the queue is empty. */
-  private next(): Task | 'wait' | null {
+  /** Skip the tasks at the front of the queue that somebody already took. */
+  private advance(): void {
+    while (this.qi < this.tasks.length && this.tasks[this.qi].taken) this.qi++;
+  }
+
+  /**
+   * Next task for cursor `c`, `'wait'` if nothing it may take is unlocked yet, `null` when the queue is empty.
+   * Looks at the first few waiting tasks, so a box that is still being drawn never leaves the other cursors idle
+   * (only its own children wait for it), and prefers the one closest to `c`: less travelling, a shorter run.
+   * Drawing order does not matter for the picture, every layer has its own z-index.
+   */
+  private next(c: Cursor): Task | 'wait' | null {
+    this.advance();
     if (this.qi >= this.tasks.length) return this.scanDone ? null : 'wait'; // more of the page is still to be scanned
-    const t = this.tasks[this.qi];
-    if (t.key > this.vp.y + this.vp.h) return 'wait'; // drawn only once the viewer has scrolled to it
-    if (t.parent && !t.parent.done) return 'wait'; // children wait for their parent box
-    this.qi++;
-    this.dropBlueprint(t);
-    return t;
+    const limit = this.vp.y + this.vp.h;
+    let best: Task | null = null;
+    let bestScore = Infinity;
+    for (let i = this.qi, seen = 0; i < this.tasks.length && seen < PICK_WINDOW; i++) {
+      const t = this.tasks[i];
+      if (t.taken) continue;
+      if (t.key > limit) break; // drawn only once the viewer has scrolled to it (the queue is sorted: the rest is locked too)
+      if (t.parent && !t.parent.done) { seen++; continue; } // children wait for their parent box
+      const score = Math.hypot(t.b.x - c.x, t.b.y - c.y) + seen * PICK_PENALTY;
+      if (score < bestScore) { best = t; bestScore = score; }
+      seen++;
+    }
+    if (!best) return 'wait';
+    best.taken = true;
+    this.dropBlueprint(best);
+    this.advance();
+    return best;
+  }
+
+  /** One more cursor joins the running swarm. */
+  private spawn(): void {
+    const c = this.addCursor();
+    this.total++;
+    void this.agent(c);
+  }
+
+  /** The bigger the page, the more cursors start on it (estimated from what the first scan found). */
+  private growForPage(): void {
+    if (this.opts.adaptive === false) return;
+    const n = this.tasks.length;
+    const covered = Math.max(1, this.coveredTo - this.startY);
+    const est = this.scanDone ? n : n * ((this.pageH - this.startY) / covered);
+    const extra = Math.min(this.maxAgents - this.total, Math.floor(est / TASKS_PER_EXTRA));
+    for (let i = 0; i < extra; i++) {
+      this.addCursor();
+      this.total++;
+    }
+  }
+
+  /** Catch-up: the more unlocked work is waiting per cursor, the faster everybody moves (never on a small page). */
+  private updateBoost(): void {
+    let n = 0;
+    if (this.opts.adaptive !== false) {
+      const limit = this.vp.y + this.vp.h;
+      for (let i = this.qi; i < this.tasks.length && n < CATCHUP_SCAN; i++) {
+        const t = this.tasks[i];
+        if (t.key > limit) break;
+        if (!t.taken) n++;
+      }
+    }
+    this.backlog = n / this.total;
+    const want = clamp(1 + (this.backlog - CATCHUP_FREE) * CATCHUP_GAIN, 1, MAX_BOOST);
+    this.boost += (want - this.boost) * 0.3;
+  }
+
+  /** Effective animation speed: the viewer's choice times the catch-up boost. */
+  private get rate(): number {
+    return this.speed * this.boost;
+  }
+
+  /** Sleep until something happens (`wake`) or `ms` pass, whichever is first: waiting cursors react at once instead of polling. */
+  private park(ms = PARK_MS): Promise<void> {
+    return new Promise((res) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        this.parked.delete(done);
+        res();
+      };
+      const timer = setTimeout(done, ms);
+      this.parked.add(done);
+    });
+  }
+
+  private wake(): void {
+    if (!this.parked.size) return;
+    for (const f of [...this.parked]) f();
   }
 
   /**
@@ -888,9 +1037,11 @@ export class Swarm {
    */
   private sweepPast(): void {
     const edge = this.vp.y - this.vp.h * 0.6;
-    for (let n = 0; n < 60 && this.qi < this.tasks.length; n++) {
+    for (let n = 0; n < 60; n++) {
+      this.advance();
       const t = this.tasks[this.qi];
-      if (t.key >= edge) break;
+      if (!t || t.key >= edge) break;
+      t.taken = true;
       this.qi++;
       this.dropBlueprint(t);
       try {
@@ -910,12 +1061,8 @@ export class Swarm {
     Object.assign(d.style, { position: 'absolute', left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px`, zIndex: String(t.order), boxSizing: 'border-box' });
     this.ui.layer.appendChild(d);
     if (t.kind === 'line') {
-      const th = Math.max(1, t.lw);
-      const horiz = Math.abs(t.pts[2] - t.pts[0]) >= Math.abs(t.pts[3] - t.pts[1]);
-      Object.assign(d.style, {
-        left: `${Math.min(t.pts[0], t.pts[2]) - (horiz ? 0 : th / 2)}px`, top: `${Math.min(t.pts[1], t.pts[3]) - (horiz ? th / 2 : 0)}px`,
-        width: horiz ? `${Math.abs(t.pts[2] - t.pts[0])}px` : `${th}px`, height: horiz ? `${th}px` : `${Math.abs(t.pts[3] - t.pts[1])}px`, background: t.color,
-      });
+      const g = lineGeom(t);
+      Object.assign(d.style, { left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px`, background: t.color });
     } else if (t.kind === 'rect') {
       Object.assign(d.style, t.cs);
     } else if (t.kind === 'media') {
@@ -932,7 +1079,9 @@ export class Swarm {
    * Once in a while, when everything is quiet, they pull off a small easter egg around it.
    */
   private followMouse(now: number): void {
-    const idle = this.cursors.filter((c) => !this.working.has(c));
+    const idle = this.idleBuf;
+    idle.length = 0;
+    for (const c of this.cursors) if (!this.working.has(c)) idle.push(c);
     if (!idle.length) return;
     const tx = this.cx + this.vp.x;
     const ty = this.cy + this.vp.y;
@@ -964,13 +1113,13 @@ export class Swarm {
   private async agent(c: Cursor): Promise<void> {
     while (!this.dead) {
       if (this.assisting.has(c)) {
-        await sleep(40); // busy helping a colleague
+        await this.park(); // busy helping a colleague
         continue;
       }
-      const t = this.next();
+      const t = this.next(c);
       if (t === null) break;
       if (t === 'wait') {
-        await sleep(60); // nothing unlocked: this cursor follows the mouse (followMouse) until something is
+        await this.park(); // nothing unlocked: this cursor follows the mouse (followMouse) until something is
         continue;
       }
       try {
@@ -982,11 +1131,12 @@ export class Swarm {
         c.mode('arrow');
       }
     }
-    while (this.carrying > 0 && !this.dead) await sleep(40); // a helper is still carrying this cursor's work
+    while (this.carrying > 0 && !this.dead) await this.park(); // a helper is still carrying this cursor's work
     if (++this.finishedAgents === this.total && !this.dead) this.finish();
   }
 
   private finish(): void {
+    if (this.progDirty) this.flushProgress();
     for (const c of this.cursors) this.fx.burst(c.x, c.y, c.col, 28);
     this.finished = true;
     setTimeout(() => this.ui.fadeProgress(), 700);

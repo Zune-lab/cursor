@@ -1,5 +1,12 @@
 export const COLORS = ['#ff5b5b', '#ffb02e', '#2ecc71', '#20b2ff', '#8b5cf6', '#ff4fa3', '#00c2a8', '#f97316'];
-export const NAMES = ['Mai', 'Linh', 'Khoa', 'Nam', 'Hà', 'Bảo', 'Vy', 'Tuấn'];
+export const NAMES = ['Mai', 'Linh', 'Khoa', 'Nam', 'Hà', 'Bảo', 'Vy', 'Tuấn', 'Phúc', 'Trang', 'Dũng', 'Lan', 'Hải', 'Quân'];
+
+/** `n` cursor colors: the hand-picked eight first, then evenly spread hues (golden angle) so a big swarm never repeats a color. */
+export function palette(n: number): string[] {
+  const out = [...COLORS];
+  for (let i = out.length; i < n; i++) out.push(`hsl(${Math.round(((i - COLORS.length) * 137.508 + 20) % 360)} 72% 52%)`);
+  return out;
+}
 
 export const ACCENT = '#0d99ff';
 export const ALERT = '#f24822';

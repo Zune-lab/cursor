@@ -15,6 +15,8 @@ export class Cursor {
   readonly col: string;
   /** Set by the swarm; a neutral personality until then. */
   persona: Persona = { pace: 1, likes: 'text', helpful: 0.6, think: 0 };
+  private shown: string | null = null; // tag text currently in the DOM
+  private shownRot = 0;
   private readonly el: HTMLDivElement;
   private readonly arrow: SVGElement;
   private readonly tag: HTMLDivElement;
@@ -45,7 +47,10 @@ export class Cursor {
     this.x = x;
     this.y = y;
     this.el.style.transform = `translate(${x}px,${y}px)`;
-    this.arrow.style.transform = `rotate(${this.rot}deg)`;
+    if (Math.abs(this.rot - this.shownRot) >= 0.1) { // an imperceptible lean is not worth a style write every frame
+      this.shownRot = this.rot;
+      this.arrow.style.transform = `rotate(${this.rot}deg)`;
+    }
   }
 
   mode(m: CursorMode): void {
@@ -55,14 +60,18 @@ export class Cursor {
   /** Replace the tag text; `alert` paints it red (distance / guide readouts). */
   say(text: string, alert = false): void {
     this.tag.style.display = '';
-    this.tag.textContent = text;
+    if (this.shown !== text) {
+      this.shown = text;
+      this.tag.textContent = text;
+    }
     if (alert) this.tag.style.background = ALERT;
   }
 
   /** Back to the resting tag: hidden, or just "<name>" when `showNames` is on. */
   reset(): void {
     this.tag.style.background = this.col;
-    this.tag.textContent = this.showName ? this.name : '';
+    this.shown = this.showName ? this.name : '';
+    this.tag.textContent = this.shown;
     this.tag.style.display = this.showName ? '' : 'none';
   }
 
