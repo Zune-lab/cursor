@@ -93,7 +93,7 @@ describe('hotkey', () => {
 
 describe('public api', () => {
   it('exposes the documented surface', () => {
-    expect(Object.keys(SwarmCursors).sort()).toEqual(['bindHotkey', 'isRunning', 'start', 'stop', 'version']);
+    expect(Object.keys(SwarmCursors).sort()).toEqual(['bindHotkey', 'isRunning', 'pick', 'pickAndStart', 'start', 'stop', 'version']);
     expect(SwarmCursors.version).toBe('test');
   });
 });

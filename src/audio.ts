@@ -21,6 +21,9 @@ export class AudioEngine {
   private closed = false;
   private unlock: (() => void) | null = null;
 
+  /** True while the tab is in the background: nothing is played and no context is created. */
+  muted = false;
+
   constructor(public enabled: boolean, private readonly onLock?: (locked: boolean) => void) {}
 
   /** Create the context early so a blocked autoplay policy can be reported ("Tap for sound"). */
@@ -29,7 +32,7 @@ export class AudioEngine {
   }
 
   private context(): AudioContext | null {
-    if (this.closed) return null;
+    if (this.closed || this.muted) return null;
     if (!this.ctx) {
       const Ctor = window.AudioContext || (window as WebkitWindow).webkitAudioContext;
       if (!Ctor) return null;

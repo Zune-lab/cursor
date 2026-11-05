@@ -21,11 +21,17 @@ export interface Labels {
   /** Shown next to the sound button while the browser keeps audio locked. */
   tapForSound: string;
   preparing: string;
+  /** Tag of a cursor that steps in to help a busy colleague (the colleague's name follows). */
+  helping: string;
 }
 
 export interface SwarmOptions {
   /** Number of cursors that start building. Default 6. */
   agents?: number;
+  /** Idle cursors take over chores from busy ones (carrying a typed text frame home) so the busy one can move on. Default true. */
+  teamwork?: boolean;
+  /** Type each text box in an empty spot nearby, then drag the finished frame into place. Default true. */
+  stageText?: boolean;
   /** Animation speed multiplier (1, 2, 3 in the toolbar). Default 1. */
   speed?: number;
   /** Play the pentatonic build sounds. Default true. */
@@ -48,6 +54,12 @@ export interface SwarmOptions {
   seed?: number;
   /** Hard cap on how many page elements are rebuilt. The page is scanned band by band while you scroll, so the default is high. Default 20000. */
   maxTasks?: number;
+  /** Chrome extension only: screenshot canvases / videos / iframes the page won't let us read (those on screen when it starts). Default true. */
+  captureMedia?: boolean;
+  /** Show a dashed "blueprint" outline for blocks that are unlocked but still waiting for a cursor. Default false. */
+  blueprint?: boolean;
+  /** Run the effect on one section only: a CSS selector or an element. Only that box is blanked and rebuilt; the rest of the page stays live. */
+  target?: string | Element;
   /** CSS selector of elements to leave out (their subtree is skipped). */
   exclude?: string;
   /** Toolbar text. */

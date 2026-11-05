@@ -27,6 +27,7 @@ export const CSS = `
 @keyframes pop{from{opacity:.4;transform:scale(.975)}}
 .ruler{position:fixed;left:0;top:0;bottom:0;width:18px;background:#2b2b2bcc;opacity:0;transition:opacity .25s;z-index:2147482500;pointer-events:none}
 .guide{position:absolute;top:0;bottom:0;width:0;border-left:1px solid #f24822;z-index:2147481000;pointer-events:none}
+.bp{position:absolute;box-sizing:border-box;border:1px dashed rgba(13,153,255,.55);background:rgba(13,153,255,.04);pointer-events:none;z-index:0}
 .sel{position:absolute;outline:1px solid #0d99ff;z-index:2147482000;pointer-events:none}
 .sel i{position:absolute;width:7px;height:7px;margin:-3.5px;background:#fff;border:1px solid #0d99ff;box-sizing:border-box}
 .caret{display:inline-block;width:1px;height:1em;margin-left:1px;vertical-align:text-bottom;background:currentColor;animation:blink 1s steps(1) infinite}

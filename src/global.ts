@@ -21,6 +21,10 @@ export function optionsFromScript(el: HTMLElement | null): SwarmOptions {
   if (d.prime === 'off') o.prime = false;
   if (d.tour === 'on') o.tour = true;
   if (d.exclude) o.exclude = d.exclude;
+  if (d.target) o.target = d.target;
+  if (d.blueprint === 'on') o.blueprint = true;
+  if (d.stage === 'off') o.stageText = false;
+  if (d.teamwork === 'off') o.teamwork = false;
   if (d.labels) {
     try {
       o.labels = JSON.parse(d.labels) as Partial<Labels>;

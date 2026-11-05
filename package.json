@@ -1,6 +1,6 @@
 {
   "name": "swarm-cursors",
-  "version": "2.4.0",
+  "version": "2.12.0",
   "description": "Blank the page, then a swarm of fake multiplayer cursors rebuilds it live \u2014 boxes, text, images, sound and sparks.",
   "type": "module",
   "license": "MIT",

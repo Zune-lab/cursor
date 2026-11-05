@@ -11,6 +11,7 @@ export const DEFAULT_LABELS: Labels = {
   done: 'Done',
   replay: 'Replay',
   goLive: 'Go live',
+  helping: 'Helping',
   sound: 'Sound',
   close: 'Close',
   tapForSound: 'Tap for sound',
@@ -30,11 +31,15 @@ export class Ui {
   private soundOn = true;
   private locked = false;
 
-  constructor(bg: string, width: number, height: number, private readonly L: Labels) {
+  /** Section mode: the overlay only covers this box (document coordinates); `layer` still uses page coordinates. */
+  private region: { x: number; y: number; w: number; h: number } | null;
+
+  constructor(bg: string, width: number, height: number, private readonly L: Labels, region: { x: number; y: number; w: number; h: number } | null = null) {
+    this.region = region;
     const host = document.createElement('div');
     host.setAttribute('data-swarm', '');
     Object.assign(host.style, {
-      position: 'absolute', left: '0', top: '0', width: `${width}px`, height: `${height}px`,
+      position: 'absolute', left: `${region?.x ?? 0}px`, top: `${region?.y ?? 0}px`, width: `${region?.w ?? width}px`, height: `${region?.h ?? height}px`,
       zIndex: '2147483646', background: bg, opacity: '0', transition: 'opacity .5s',
       overflow: 'hidden', // cursors / selection boxes near the edge must never enlarge the page
     });
@@ -56,6 +61,23 @@ export class Ui {
     this.prog = sh.querySelector('.prog') as HTMLDivElement;
     this.status = sh.querySelector('.st') as HTMLElement;
     this.bar = sh.querySelector('.bar') as HTMLElement;
+    this.fitLayer(width, height);
+  }
+
+  /** In section mode the layer is as big as the page and shifted back, so page coordinates keep working inside the clipped host. */
+  private fitLayer(pageW: number, pageH: number): void {
+    if (!this.region) return;
+    Object.assign(this.layer.style, {
+      inset: 'auto', left: `${-this.region.x}px`, top: `${-this.region.y}px`, width: `${pageW}px`, height: `${pageH}px`,
+    });
+  }
+
+  /** Section mode: follow the section if it grew or moved (lazy content, images loading). */
+  setRegion(box: { x: number; y: number; w: number; h: number }, pageW: number, pageH: number): void {
+    if (!this.region) return;
+    this.region = box;
+    Object.assign(this.host.style, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.w}px`, height: `${box.h}px` });
+    this.fitLayer(pageW, pageH);
   }
 
   /** Delegated click on the toolbar: `cb(action, button)`. */
@@ -101,6 +123,7 @@ export class Ui {
   }
 
   resizeTo(width: number, height: number): void {
+    if (this.region) return this.fitLayer(width, height); // section mode: the host keeps the section's box
     this.host.style.width = `${width}px`;
     this.host.style.height = `${height}px`;
   }

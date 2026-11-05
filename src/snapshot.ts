@@ -5,6 +5,10 @@ import { esc, isNone, isTransparent, pick } from './util';
 export interface SnapshotOptions {
   maxTasks?: number;
   exclude?: string;
+  /** Rebuild only this element's subtree (default: the whole `<body>`). */
+  root?: Element;
+  /** Screenshots (from the extension) for media we cannot read ourselves. */
+  stills?: WeakMap<Element, string>;
 }
 
 const SKIP = new Set(SKIP_TAGS);
@@ -72,7 +76,7 @@ function htmlOf(el: Element): string {
  * A still image for <canvas> / <video> when the browser lets us read one
  * (not tainted, not huge). Videos fall back to their poster.
  */
-function stillFrame(el: Element, tag: string): string | undefined {
+export function stillFrame(el: Element, tag: string): string | undefined {
   try {
     if (tag === 'canvas') {
       const c = el as HTMLCanvasElement;
@@ -172,7 +176,7 @@ export class Scanner {
 
       if (ok && MEDIA.has(tag)) {
         if (fresh) {
-          out.push({ kind: 'media', tag: tag as MediaTag, b, node: el, cs: pick(cs, MEDIA_PROPS), color: cs.color, src: stillFrame(el, tag), parent: cur, order: this.order++, key: 0 });
+          out.push({ kind: 'media', tag: tag as MediaTag, b, node: el, cs: pick(cs, MEDIA_PROPS), color: cs.color, src: stillFrame(el, tag) ?? this.opts.stills?.get(el), parent: cur, order: this.order++, key: 0 });
           this.emitted.add(el);
           this.leaf.add(el);
         }
@@ -229,7 +233,7 @@ export class Scanner {
           visit(inner.body, { ox, oy, fx: ox, fy: oy, clip: ctx.clip ? intersect(b, ctx.clip) : b });
           cur = prev;
         } else if (fresh && !this.leaf.has(el)) {
-          out.push({ kind: 'media', tag: 'iframe', b, node: el, cs: pick(cs, MEDIA_PROPS), color: cs.color, parent: cur, order: this.order++, key: 0 });
+          out.push({ kind: 'media', tag: 'iframe', b, node: el, cs: pick(cs, MEDIA_PROPS), color: cs.color, src: this.opts.stills?.get(el), parent: cur, order: this.order++, key: 0 });
           this.emitted.add(el);
           this.leaf.add(el);
         }
@@ -283,7 +287,7 @@ export class Scanner {
       cur = prev;
     };
 
-    visit(document.body, { ox: window.scrollX, oy: window.scrollY, fx: 0, fy: 0, clip: null });
+    visit(this.opts.root ?? document.body, { ox: window.scrollX, oy: window.scrollY, fx: 0, fy: 0, clip: null });
 
     for (const t of out) t.key = Math.max(t.b.y, t.parent ? t.parent.key : -1e9); // a child never sorts before its parent
     out.sort((a, b) => a.key - b.key || a.order - b.order);

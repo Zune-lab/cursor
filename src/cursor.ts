@@ -1,5 +1,6 @@
 import { ALERT } from './constants';
 import { clamp } from './util';
+import type { Persona } from './persona';
 
 export type CursorMode = 'arrow' | 'cross' | 'text';
 
@@ -12,6 +13,8 @@ export class Cursor {
   rot = 0;
   readonly name: string;
   readonly col: string;
+  /** Set by the swarm; a neutral personality until then. */
+  persona: Persona = { pace: 1, likes: 'text', helpful: 0.6, think: 0 };
   private readonly el: HTMLDivElement;
   private readonly arrow: SVGElement;
   private readonly tag: HTMLDivElement;
